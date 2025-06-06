@@ -223,8 +223,8 @@ class OnlineMMDPlusStreamer:
 
         # Update sparsity count
         final_weights = torch.relu(torch.cat([p['logit'].detach() for p in self.point_buffer]))
-        num_nonzero = torch.sum(final_weights > self.epsilon).item()
-        print("Number of non-zero weights after optimization:", num_nonzero, "Total final weights:", len(final_weights), 'Length of point buffer:', len(self.point_buffer))
+        num_nonzero = torch.sum(final_weights > 1e-9).item()
+        print("Number of non-zero weights after optimization:", num_nonzero, 'Length of point buffer:', len(self.point_buffer))
         self.sparsity_history.append(num_nonzero / len(self.point_buffer))
 
 
@@ -328,21 +328,21 @@ def run_intelligent_streaming_experiment():
     # --- Configuration ---
     DATASET_SUBSET_SIZE = 2500
     BATCH_SIZE = 50
-    N_RFF_COMPONENTS = 50
+    N_RFF_COMPONENTS = 100
     KERNEL_GAMMA = 0.1
     
     # OnlineMMDPlusStreamer params
     # Buffer capacity will be a multiple of the coreset size
     BUFFER_CAPACITY_FACTOR = 3 
-    N_EPOCHS_ONLINE_UPDATE = 200
+    N_EPOCHS_ONLINE_UPDATE = 20
     LR_ONLINE = 0.1
-    LAMBDA_LOG_ONLINE = 1e-5 # Lambda can be tuned based on observed sparsity
+    LAMBDA_LOG_ONLINE = 5e-5 # Lambda can be tuned based on observed sparsity
 
-    coreset_sizes_to_test = [20] #[10, 20, 30, 40, 50, 60, 70]
+    coreset_sizes_to_test = np.arange(20, 30) #[10, 20, 30, 40, 50, 60, 70]
 
     # --- Load Data ---
     print("Loading data...")
-    np.random.seed(1421380)  # For reproducibility
+    np.random.seed(23874291)  # For reproducibility
     X_train_full, X_val, y_train_full, y_val = load_adult_data(DATASET_SUBSET_SIZE)
     num_total_stream_points = X_train_full.shape[0]
     num_batches = (num_total_stream_points + BATCH_SIZE - 1) // BATCH_SIZE
@@ -362,7 +362,7 @@ def run_intelligent_streaming_experiment():
 
     # --- Iterate Over Coreset Sizes ---
     for m_coreset in coreset_sizes_to_test:
-        buffer_capacity = BUFFER_CAPACITY_FACTOR * m_coreset
+        buffer_capacity = 150
         print(f"\n--- Processing for Coreset Size m = {m_coreset} (Buffer Capacity = {buffer_capacity}) ---")
         results['coreset_size'].append(m_coreset)
 
