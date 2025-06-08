@@ -10,7 +10,10 @@ from sklearn.kernel_approximation import RBFSampler
 from sklearn.datasets import fetch_openml
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-import time # For tracking processing time
+import time
+
+from bcsstreamer import BilevelCoresetSelector
+from ocsstreamer import OCSStreamer # For tracking processing time
 
 # --- Your provided helper functions (load_adult_data, train_classifier, calculate_mmd2_exact) ---
 # (Assuming these are defined as in your prompt)
@@ -59,11 +62,16 @@ def load_adult_data(subset_size=500):
   return X_train_processed, X_val_processed, y_train, y_val
 
 
-# --- Downstream Classification Model Training ---
 def train_classifier(X_train: np.ndarray, X_val: np.ndarray, y_train: np.ndarray, y_val: np.ndarray) -> float:
-    if len(np.unique(y_train)) < 2:
-        print(f"  Warning: Training data for classifier contains only {len(np.unique(y_train))} unique class(es) (labels: {np.unique(y_train)}). Skipping training and returning NaN.")
-        return np.nan
+    unique_classes = np.unique(y_train)
+    
+    if len(unique_classes) < 2:
+        print(f"  Warning: Training data contains only one class (label: {unique_classes[0]}). Using constant prediction.")
+        # Predict the same class for all validation samples
+        y_pred = np.full_like(y_val, fill_value=unique_classes[0])
+        acc = accuracy_score(y_val, y_pred)
+        return acc
+
     clf = LogisticRegression(max_iter=1000, random_state=42)
     clf.fit(X_train, y_train)
     y_pred = clf.predict(X_val)
@@ -338,7 +346,7 @@ def run_intelligent_streaming_experiment():
     LR_ONLINE = 0.1
     LAMBDA_LOG_ONLINE = 5e-5 # Lambda can be tuned based on observed sparsity
 
-    coreset_sizes_to_test = np.arange(20, 30) #[10, 20, 30, 40, 50, 60, 70]
+    coreset_sizes_to_test = np.arange(20, 40, 5) #[10, 20, 30, 40, 50, 60, 70]
 
     # --- Load Data ---
     print("Loading data...")
@@ -358,7 +366,9 @@ def run_intelligent_streaming_experiment():
     print(f"\nBaseline (whole dataset) accuracy: {acc_whole:.4f}")
 
     # --- Results Storage ---
-    results = { 'coreset_size': [], 'OnlineMMDPlus_Acc': [], 'OnlineMMDPlus_MMD': [], 'Reservoir_Acc': [], 'Reservoir_MMD': [] }
+    results = { 'coreset_size': [], 'OnlineMMDPlus_Acc': [], 'OnlineMMDPlus_MMD': [], 
+               'Reservoir_Acc': [], 'Reservoir_MMD': [], 'OCS_Acc': [], 'OCS_MMD': [],
+                'BCSR_Acc': [], 'BCSR_MMD': [] }
 
     # --- Iterate Over Coreset Sizes ---
     for m_coreset in coreset_sizes_to_test:
@@ -426,17 +436,95 @@ def run_intelligent_streaming_experiment():
 
         print(f"  Reservoir (averaged over {num_trials} trials): Acc={average_acc:.4f}, Exact MMD={average_mmd_exact:.6f}")
 
+                # --- Method 3: Online Coreset Selection (OCS) ---
+        print("  Streaming with OCSStreamer...")
+        # Note: You'll need to pass y_train_full to the streamer
+        # --- Inside your loop for Method 3: Online Coreset Selection (OCS) ---
+
+        ocs_streamer = OCSStreamer(m_coreset_size=m_coreset, batch_size=BATCH_SIZE, tau=1.0, random_seed=42)
+
+        for i in range(num_batches):
+            start_idx = i * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, num_total_stream_points)
+            X_batch = X_train_full[start_idx:end_idx]
+            y_batch = y_train_full[start_idx:end_idx]
+            batch_indices = np.arange(start_idx, end_idx)
+            if X_batch.shape[0] > 0:
+                # CORRECTED: Pass X_train_full and y_train_full to the method
+                ocs_streamer.process_batch(X_batch, y_batch, batch_indices, X_train_full, y_train_full)
+
+        # Final Evaluation for OCS
+        X_core_ocs, y_core_ocs, w_core_ocs = ocs_streamer.get_final_coreset_details(X_train_full, y_train_full)
+        acc_ocs = train_classifier(X_core_ocs, X_val, y_core_ocs, y_val)
+        mmd_exact_ocs = calculate_mmd2_exact(X_train_full, X_core_ocs, w_core_ocs, KERNEL_GAMMA)
+
+        # Add results to your results dictionary
+        results['OCS_Acc'].append(acc_ocs)
+        results['OCS_MMD'].append(mmd_exact_ocs)
+        print(f"OCS: Acc={acc_ocs:.4f}, Exact MMD={mmd_exact_ocs:.6f}")
+
+
+        # --- Method 3: Bilevel Coreset Selection (BCSR) ---
+        print("    Streaming with Bilevel Coreset Selection...")
+        input_dim = X_train_full.shape[1] # Number of features in the dataset
+        
+        # Initialize BCSR streamer with tunable parameters.
+        # These values are reasonable starting points but can be further tuned.
+        bcsr_streamer = BilevelCoresetSelector(
+            input_dim=input_dim,
+            m_coreset_size=m_coreset,
+            outer_loops=5,  # J: Number of outer iterations for 'w'
+            inner_loops=5,  # N: Number of inner iterations for 'theta' (model_cs)
+            lr_outer=0.01,  # Learning rate for coreset weights (w)
+            lr_inner=0.001, # Learning rate for inner model (model_cs)
+            lambda_reg=0.001, # Regularization strength for 'smoothed top-K' (sparsity)
+            random_seed=42
+        )
+        # Set the full dataset for upper-level objective evaluation
+        bcsr_streamer.set_full_data(X_train_full, y_train_full)
+
+        # Stream batches to the BCSR algorithm
+        for i in range(num_batches):
+            start_idx = i * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, num_total_stream_points)
+            X_batch = X_train_full[start_idx:end_idx]
+            y_batch = y_train_full[start_idx:end_idx] # Pass corresponding labels
+
+            if X_batch.shape[0] > 0:
+                bcsr_streamer.process_batch(X_batch, y_batch) # Process batch with labels
+
+        # Final Evaluation for BCSR
+        coreset_flat_indices_bcsr, w_core_bcsr = bcsr_streamer.get_final_coreset()
+        
+        if len(coreset_flat_indices_bcsr) > 0:
+            X_core_bcsr = X_train_full[coreset_flat_indices_bcsr]
+            y_core_bcsr = y_train_full[coreset_flat_indices_bcsr]
+            
+            acc_bcsr = train_classifier(X_core_bcsr, X_val, y_core_bcsr, y_val)
+            mmd_exact_bcsr = calculate_mmd2_exact(X_train_full, X_core_bcsr, w_core_bcsr, KERNEL_GAMMA)
+        else:
+            acc_bcsr = 0.0
+            mmd_exact_bcsr = float('inf')
+
+        results['BCSR_Acc'].append(acc_bcsr)
+        results['BCSR_MMD'].append(mmd_exact_bcsr)
+        print(f"    BCSR: Acc={acc_bcsr:.4f}, Exact MMD={mmd_exact_bcsr:.6f}")
+
     # --- Plotting Results ---
     # (Plotting code would be similar to before, comparing OnlineMMDPlus_Acc/MMD with Reservoir_Acc/MMD)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
     ax1.plot(results['coreset_size'], results['OnlineMMDPlus_Acc'], marker='o', linestyle='-', label='OnlineMMDPlus Streamer')
     ax1.plot(results['coreset_size'], results['Reservoir_Acc'], marker='s', linestyle='--', label='Reservoir Sampling')
+    ax1.plot(results['coreset_size'], results['OCS_Acc'], marker='^', linestyle=':', label='OCS Streamer')
+    ax1.plot(results['coreset_size'], results['BCSR_Acc'], marker='x', linestyle='-.', label='BCSR Streamer')
     ax1.axhline(acc_whole, color='k', linestyle='-', label=f'Whole Dataset ({acc_whole:.3f})')
     ax1.set_xlabel('Coreset Size (m)'); ax1.set_ylabel('Validation Accuracy')
     ax1.set_title('Accuracy vs. Coreset Size'); ax1.legend(); ax1.grid(True)
     
     ax2.plot(results['coreset_size'], results['OnlineMMDPlus_MMD'], marker='o', linestyle='-', label='OnlineMMDPlus Streamer')
     ax2.plot(results['coreset_size'], results['Reservoir_MMD'], marker='s', linestyle='--', label='Reservoir Sampling')
+    ax2.plot(results['coreset_size'], results['OCS_MMD'], marker='^', linestyle=':', label='OCS Streamer')
+    ax2.plot(results['coreset_size'], results['BCSR_MMD'], marker='x', linestyle='-.', label='BCSR Streamer')
     ax2.set_xlabel('Coreset Size (m)'); ax2.set_ylabel('Exact MMD² (RBF Kernel)')
     ax2.set_title('Exact MMD² vs. Coreset Size'); ax2.legend(); ax2.grid(True); ax2.set_yscale('log')
     plt.tight_layout(); plt.show()
