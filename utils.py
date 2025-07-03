@@ -27,3 +27,23 @@ def calculate_mmd2_exact(X_full, X_coreset, coreset_weights, kernel_gamma):
 
     mmd2 = term1 + term2 + term3
     return max(0, mmd2.item()) # MMD^2 should be non-negative
+
+
+def calculate_mmd2_approx(X_full, X_coreset, coreset_weights, rbf_sampler):
+    if len(X_coreset) == 0 or len(X_full) == 0:
+        return np.inf
+
+    # Transform datasets to RFF feature space
+    z_X = rbf_sampler.transform(X_full)  # Shape: (n, n_components)
+    z_Y = rbf_sampler.transform(X_coreset)  # Shape: (m, n_components)
+
+    # Compute mean of z_X (uniform weights: 1/n)
+    mean_z_X = np.mean(z_X, axis=0)  # Shape: (n_components,)
+
+    # Compute weighted mean of z_Y
+    mean_z_Y = np.dot(coreset_weights, z_Y)  # Shape: (n_components,)
+
+    # Compute MMD^2 as squared Euclidean norm of the difference
+    mmd2 = np.sum((mean_z_X - mean_z_Y)**2)
+
+    return max(0, mmd2)

@@ -7,7 +7,7 @@ from bcsstreamer import BilevelCoresetSelector
 from ocsstreamer import OCSStreamer
 from reservoirstreamer import ReservoirSamplerBatchStreamer
 from mmdplusstreamer import OnlineMMDPlusStreamer
-from dataloaders import load_adult_data
+from dataloaders import load_adult_data, load_electricity_tiny
 from utils import calculate_mmd2_exact
 from downstream_tasks import train_classifier
 
@@ -170,6 +170,28 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     config = vars(args)
+
+#     config = {
+#     "benchmarks": ["OnlineMMDPlus", "OCS"],  # only these
+#     "coreset_sizes": [30, 60, 90],
+#     "dataset_subset_size": 5000,
+#     "batch_size": 100,
+#     "n_rff_components": 200,
+#     "kernel_gamma": 0.05,
+#     "buffer_capacity": 200,
+#     "random_seed": 12345,
+#     "n_epochs_online": 30,
+#     "lr_online": 0.05,
+#     "lambda_log_online": 1e-4,
+#     "reservoir_trials": 5,
+#     "ocs_tau": 0.5,
+#     "bcsr_outer_loops": 3,
+#     "bcsr_inner_loops": 10,
+#     "bcsr_lr_outer": 0.02,
+#     "bcsr_lr_inner": 0.002,
+#     "bcsr_lambda": 0.0005,
+# }
+
 
     # Example config printing
     print("Using config:", config)
