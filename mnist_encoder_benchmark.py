@@ -2,45 +2,14 @@ import argparse
 import numpy as np
 from sklearn.kernel_approximation import RBFSampler
 import matplotlib.pyplot as plt
-from torchvision import datasets, transforms  # Added
-from sklearn.decomposition import PCA       # Added
-
 from bcsstreamer import BilevelCoresetSelector
 from ocsstreamer import OCSStreamer
 from reservoirstreamer import ReservoirSamplerBatchStreamer
 from mmdplusstreamer import OnlineMMDPlusStreamer
-from dataloaders import load_adult_data, load_electricity_tiny
+from dataloaders import load_mnist_embedded_autoencoder
 from utils import calculate_mmd2_exact
 from downstream_tasks import train_classifier
 
-
-def load_mnist_embedded(subset_size, embed_dim=50):
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-    
-    # Load MNIST training and test sets
-    train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-    
-    # Select random subset for training
-    indices_train = np.random.choice(len(train_dataset), subset_size, replace=False)
-    X_train = train_dataset.data[indices_train].numpy().reshape(-1, 784) / 255.0
-    y_train = train_dataset.targets[indices_train].numpy()
-    
-    # Select proportional test subset (maintaining ~6:1 train:test ratio)
-    test_subset_size = int(np.ceil(subset_size / 6))
-    indices_test = np.random.choice(len(test_dataset), test_subset_size, replace=False)
-    X_val = test_dataset.data[indices_test].numpy().reshape(-1, 784) / 255.0
-    y_val = test_dataset.targets[indices_test].numpy()
-    
-    # Apply PCA
-    pca = PCA(n_components=embed_dim)
-    X_train_embedded = pca.fit_transform(X_train)
-    X_val_embedded = pca.transform(X_val)
-    
-    return X_train_embedded, X_val_embedded, y_train, y_val
 
 def run_experiment(config):
     # Unpack config
@@ -65,7 +34,7 @@ def run_experiment(config):
 
     print("Loading data...")
     np.random.seed(seed)
-    X_train, X_val, y_train, y_val = load_mnist_embedded(ds_size, embed_dim=20)  # Modified
+    X_train, X_val, y_train, y_val = load_mnist_embedded_autoencoder(ds_size, embed_dim=50, autoencoder_path ='./checkpoints/autoencoder.pth')  # Modified
     n_total = X_train.shape[0]
     num_batches = int(np.ceil(n_total / batch_size))
     print(f"Data: {n_total} points, batch_size={batch_size}, batches={num_batches}")
@@ -185,12 +154,12 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_subset_size", type=int, default=2500)
     parser.add_argument("--batch_size", type=int, default=50)
     parser.add_argument("--n_rff_components", type=int, default=1000)
-    parser.add_argument("--kernel_gamma", type=float, default=0.1)
-    parser.add_argument("--buffer_capacity", type=int, default=300)
-    parser.add_argument("--random_seed", type=int, default=6)
+    parser.add_argument("--kernel_gamma", type=float, default=0.01)
+    parser.add_argument("--buffer_capacity", type=int, default=150)
+    parser.add_argument("--random_seed", type=int, default=666777)
     parser.add_argument("--n_epochs_online", type=int, default=5)
-    parser.add_argument("--lr_online", type=float, default=0.1)
-    parser.add_argument("--lambda_log_online", type=float, default=5e-6)
+    parser.add_argument("--lr_online", type=float, default=0.01)
+    parser.add_argument("--lambda_log_online", type=float, default=5e-5)
     parser.add_argument("--reservoir_trials", type=int, default=10)
     parser.add_argument("--ocs_tau", type=float, default=1.0)
     parser.add_argument("--bcsr_outer_loops", type=int, default=5)

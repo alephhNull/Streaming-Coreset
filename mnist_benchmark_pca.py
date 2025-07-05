@@ -2,14 +2,17 @@ import argparse
 import numpy as np
 from sklearn.kernel_approximation import RBFSampler
 import matplotlib.pyplot as plt
+from torchvision import datasets, transforms  # Added
+from sklearn.decomposition import PCA       # Added
 
 from bcsstreamer import BilevelCoresetSelector
 from ocsstreamer import OCSStreamer
 from reservoirstreamer import ReservoirSamplerBatchStreamer
 from mmdplusstreamer import OnlineMMDPlusStreamer
-from dataloaders import load_adult_data, load_electricity_tiny
+from dataloaders import load_adult_data, load_electricity_tiny, load_mnist_embedded
 from utils import calculate_mmd2_exact
 from downstream_tasks import train_classifier
+
 
 def run_experiment(config):
     # Unpack config
@@ -34,7 +37,7 @@ def run_experiment(config):
 
     print("Loading data...")
     np.random.seed(seed)
-    X_train, X_val, y_train, y_val = load_adult_data(ds_size)
+    X_train, X_val, y_train, y_val = load_mnist_embedded(ds_size, embed_dim=20)  # Modified
     n_total = X_train.shape[0]
     num_batches = int(np.ceil(n_total / batch_size))
     print(f"Data: {n_total} points, batch_size={batch_size}, batches={num_batches}")
@@ -150,16 +153,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--benchmarks", nargs="+", default=['OnlineMMDPlus','Reservoir'],
                         help="Which methods to run")
-    parser.add_argument("--coreset_sizes", nargs="+", type=int, default=list(range(20, 50, 5)))
+    parser.add_argument("--coreset_sizes", nargs="+", type=int, default=list(range(50, 101, 10)))
     parser.add_argument("--dataset_subset_size", type=int, default=2500)
     parser.add_argument("--batch_size", type=int, default=50)
-    parser.add_argument("--n_rff_components", type=int, default=100)
+    parser.add_argument("--n_rff_components", type=int, default=1000)
     parser.add_argument("--kernel_gamma", type=float, default=0.1)
-    parser.add_argument("--buffer_capacity", type=int, default=150)
-    parser.add_argument("--random_seed", type=int, default=17878781)
+    parser.add_argument("--buffer_capacity", type=int, default=300)
+    parser.add_argument("--random_seed", type=int, default=6)
     parser.add_argument("--n_epochs_online", type=int, default=5)
     parser.add_argument("--lr_online", type=float, default=0.1)
-    parser.add_argument("--lambda_log_online", type=float, default=5e-5)
+    parser.add_argument("--lambda_log_online", type=float, default=5e-6)
     parser.add_argument("--reservoir_trials", type=int, default=10)
     parser.add_argument("--ocs_tau", type=float, default=1.0)
     parser.add_argument("--bcsr_outer_loops", type=int, default=5)

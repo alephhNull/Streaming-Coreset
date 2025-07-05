@@ -1,10 +1,16 @@
 import numpy as np
+from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
 from sklearn.datasets import fetch_openml
 import arff
 import pandas as pd
-
+import torch
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, Subset
+import os
+from utils import train_autoencoder
+from models import Autoencoder
 
 def load_adult_data(subset_size=500):
   adult = fetch_openml('adult', version=2, as_frame=True)
@@ -100,3 +106,115 @@ def load_boston():
 
   print(f'Shapes of X_train: {X_train_processed.shape}, X_val: {X_val_processed.shape}')
   return X_train_processed, X_val_processed, y_train, y_val
+
+
+def load_mnist_embedded(subset_size, embed_dim=50):
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+    
+    # Load MNIST training and test sets
+    train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+    
+    # Select random subset for training
+    indices_train = np.random.choice(len(train_dataset), subset_size, replace=False)
+    X_train = train_dataset.data[indices_train].numpy().reshape(-1, 784) / 255.0
+    y_train = train_dataset.targets[indices_train].numpy()
+    
+    # Select proportional test subset (maintaining ~6:1 train:test ratio)
+    test_subset_size = int(np.ceil(subset_size / 6))
+    indices_test = np.random.choice(len(test_dataset), test_subset_size, replace=False)
+    X_val = test_dataset.data[indices_test].numpy().reshape(-1, 784) / 255.0
+    y_val = test_dataset.targets[indices_test].numpy()
+    
+    # Apply PCA
+    pca = PCA(n_components=embed_dim)
+    X_train_embedded = pca.fit_transform(X_train)
+    X_val_embedded = pca.transform(X_val)
+    
+    return X_train_embedded, X_val_embedded, y_train, y_val
+
+
+def load_mnist_embedded_autoencoder(subset_size, embed_dim=50, autoencoder_path=None, train_autoencoder_if_not_found=True):
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,)) # Normalizes to [-1, 1]
+    ])
+    
+    # Load MNIST training and test sets
+    # Ensure data directory exists
+    if not os.path.exists('./data'):
+        os.makedirs('./data')
+        
+    train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+    
+    # Select random subset for training
+    indices_train = np.random.choice(len(train_dataset), subset_size, replace=False)
+    
+    # Create Subset datasets for efficient loading with DataLoader
+    train_subset_dataset = Subset(train_dataset, indices_train)
+    
+    # Select proportional test subset (maintaining ~6:1 train:test ratio)
+    test_subset_size = int(np.ceil(subset_size / 6))
+    indices_test = np.random.choice(len(test_dataset), test_subset_size, replace=False)
+    test_subset_dataset = Subset(test_dataset, indices_test)
+    
+    # Prepare DataLoaders
+    # Using batch_size for training autoencoder and for embedding extraction
+    batch_size = 256 
+    train_loader = DataLoader(train_subset_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_subset_dataset, batch_size=batch_size, shuffle=False)
+
+    # Initialize Autoencoder
+    input_dim = 28 * 28 # MNIST image size
+    autoencoder = Autoencoder(input_dim, embed_dim)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    autoencoder.to(device)
+
+    # Load or train Autoencoder
+    if autoencoder_path and os.path.exists(autoencoder_path):
+        print(f"Loading pre-trained Autoencoder from {autoencoder_path}")
+        autoencoder.load_state_dict(torch.load(autoencoder_path, map_location=device, weights_only=True))
+    elif train_autoencoder_if_not_found:
+        print("Pre-trained Autoencoder not found or path not provided. Training a new one.")
+        # Train on the full training dataset for better generalization if subset_size is small
+        # Or train on the train_subset_dataset if you want the autoencoder to learn from the same data
+        full_train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        train_autoencoder(autoencoder, full_train_loader, epochs=5, device=device) # Train on full MNIST train set
+        if autoencoder_path:
+            os.makedirs(os.path.dirname(autoencoder_path), exist_ok=True)
+            torch.save(autoencoder.state_dict(), autoencoder_path)
+            print(f"Saved trained Autoencoder to {autoencoder_path}")
+    else:
+        raise FileNotFoundError(f"Autoencoder path '{autoencoder_path}' not found and 'train_autoencoder_if_not_found' is False.")
+
+    # Extract embeddings
+    autoencoder.eval() # Set to evaluation mode
+    
+    X_train_embedded_list = []
+    y_train_list = []
+    with torch.no_grad():
+        for data, targets in train_loader:
+            img = data.view(data.size(0), -1).to(device)
+            embeddings = autoencoder.encoder(img).cpu().numpy()
+            X_train_embedded_list.append(embeddings)
+            y_train_list.append(targets.numpy())
+    
+    X_val_embedded_list = []
+    y_val_list = []
+    with torch.no_grad():
+        for data, targets in test_loader:
+            img = data.view(data.size(0), -1).to(device)
+            embeddings = autoencoder.encoder(img).cpu().numpy()
+            X_val_embedded_list.append(embeddings)
+            y_val_list.append(targets.numpy())
+
+    X_train_embedded = np.vstack(X_train_embedded_list)
+    y_train = np.hstack(y_train_list)
+    X_val_embedded = np.vstack(X_val_embedded_list)
+    y_val = np.hstack(y_val_list)
+
+    return X_train_embedded, X_val_embedded, y_train, y_val
