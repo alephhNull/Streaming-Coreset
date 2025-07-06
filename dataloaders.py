@@ -6,6 +6,8 @@ from sklearn.datasets import fetch_openml
 import arff
 import pandas as pd
 import torch
+import torch.nn as nn
+import torchvision
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Subset
 import os
@@ -218,3 +220,95 @@ def load_mnist_embedded_autoencoder(subset_size, embed_dim=50, autoencoder_path=
     y_val = np.hstack(y_val_list)
 
     return X_train_embedded, X_val_embedded, y_train, y_val
+
+
+def load_cifar10_encoded(subset_size, embed_dim=512): # embed_dim is typically the output dimension of your chosen encoder layer
+    """
+    Loads CIFAR-10 data and extracts features using a pretrained ResNet-18 encoder.
+
+    Args:
+        subset_size (int): The number of samples to use for the training subset.
+        embed_dim (int): The desired dimension of the embedded features.
+                         This should match the output dimension of the chosen
+                         encoder layer.
+
+    Returns:
+        tuple: X_train_encoded, X_val_encoded, y_train, y_val
+               where X_train_encoded and X_val_encoded are the encoded features,
+               and y_train and y_val are the corresponding labels.
+    """
+
+    # 1. Define Transforms for CIFAR-10
+    # CIFAR-10 images are 32x32. Pretrained models like ResNet expect 224x224,
+    # so we'll need to resize. Normalization also needs to match ImageNet's
+    # mean and standard deviation.
+    transform = transforms.Compose([
+        transforms.Resize(224), # Resize for pretrained models like ResNet
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    # 2. Load CIFAR-10 Training and Test Sets
+    train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    test_dataset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+
+    # 3. Select Random Subsets (as in your original function)
+    indices_train = np.random.choice(len(train_dataset), subset_size, replace=False)
+    # Using Subset to get actual data based on indices
+    train_subset = torch.utils.data.Subset(train_dataset, indices_train)
+    y_train = np.array([train_dataset.targets[i] for i in indices_train])
+
+    test_subset_size = int(np.ceil(subset_size / 6))
+    indices_test = np.random.choice(len(test_dataset), test_subset_size, replace=False)
+    test_subset = torch.utils.data.Subset(test_dataset, indices_test)
+    y_val = np.array([test_dataset.targets[i] for i in indices_test])
+
+    # Create DataLoaders for efficient batch processing
+    train_loader = torch.utils.data.DataLoader(train_subset, batch_size=64, shuffle=False, num_workers=2)
+    val_loader = torch.utils.data.DataLoader(test_subset, batch_size=64, shuffle=False, num_workers=2)
+
+
+    # 4. Load a Pretrained Encoder (e.g., ResNet-18)
+    # We'll use a ResNet-18 pretrained on ImageNet.
+    # We remove the final classification layer to get the features.
+    model = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.IMAGENET1K_V1)
+    # Remove the final fully connected layer (classifier)
+    model = nn.Sequential(*(list(model.children())[:-1]))
+    model.eval() # Set the model to evaluation mode
+
+    # Determine the device (GPU if available, else CPU)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    # 5. Extract Features
+    def extract_features(data_loader, model, device):
+        features_list = []
+        with torch.no_grad(): # Disable gradient calculation for inference
+            for images, _ in data_loader:
+                images = images.to(device)
+                features = model(images)
+                # Flatten the features (e.g., from (batch_size, 512, 1, 1) to (batch_size, 512))
+                features_list.append(features.view(features.size(0), -1).cpu().numpy())
+        return np.vstack(features_list)
+
+    print("Extracting training features...")
+    X_train_encoded = extract_features(train_loader, model, device)
+    print("Extracting validation features...")
+    X_val_encoded = extract_features(val_loader, model, device)
+
+    # 6. Optional: Apply PCA after feature extraction if embed_dim is smaller
+    # than the encoder's output dimension.
+    # ResNet-18's last feature layer (before the FC layer) outputs 512 features.
+    # If you want a smaller embed_dim, you can apply PCA on the extracted features.
+    if embed_dim < X_train_encoded.shape[1]:
+        print(f"Applying PCA to reduce feature dimension from {X_train_encoded.shape[1]} to {embed_dim}")
+        pca = PCA(n_components=embed_dim)
+        X_train_encoded = pca.fit_transform(X_train_encoded)
+        X_val_encoded = pca.transform(X_val_encoded)
+    elif embed_dim > X_train_encoded.shape[1]:
+        print(f"Warning: Desired embed_dim ({embed_dim}) is greater than the encoder's output dimension ({X_train_encoded.shape[1]}). No PCA applied for reduction.")
+        # In this case, embed_dim effectively becomes X_train_encoded.shape[1]
+        embed_dim = X_train_encoded.shape[1]
+
+
+    return X_train_encoded, X_val_encoded, y_train, y_val
