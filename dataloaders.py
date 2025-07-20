@@ -9,10 +9,33 @@ import torch
 import torch.nn as nn
 import torchvision
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, TensorDataset
 import os
 from utils import train_autoencoder
 from models import Autoencoder
+
+
+def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_dim, device):
+    print(f"Loading dataset: {dataset_name}")
+    np.random.seed(seed)
+    if dataset_name == 'adult':
+        X_train, X_val, y_train, y_val = load_adult_data(subset_size)
+
+    X_train_tensor = torch.from_numpy(X_train).float().to(device)
+    y_train_tensor = torch.from_numpy(y_train).long().to(device)
+    X_val_tensor = torch.from_numpy(X_val).float().to(device)
+    y_val_tensor = torch.from_numpy(y_val).long().to(device)
+
+    train_loader = DataLoader(TensorDataset(X_train_tensor, y_train_tensor),
+                              batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(TensorDataset(X_val_tensor, y_val_tensor),
+                            batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader, X_train, X_val, y_train, y_val
+
+
+def load_cifar10():
+    pass
 
 def load_adult_data(subset_size=500):
   adult = fetch_openml('adult', version=2, as_frame=True)
@@ -38,7 +61,6 @@ def load_adult_data(subset_size=500):
   # Identify numerical and categorical columns
   numerical_cols = X_train.select_dtypes(include=['int64', 'float64']).columns
   categorical_cols = X_train.select_dtypes(include=['category']).columns
-#   categorical_cols = []
 
   ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
   ohe.fit(X_train[categorical_cols])

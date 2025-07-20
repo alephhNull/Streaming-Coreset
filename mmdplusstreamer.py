@@ -8,7 +8,10 @@ import torch.nn.functional as F
 class OnlineMMDPlusStreamer:
     """ An intelligent, stateful streamer for coreset selection with persistent weights and smart buffer management. """
     def __init__(self, m_coreset_size, n_rff_components, buffer_capacity,
-                 n_epochs_online=30, lr_online=0.01, lambda_log_online=1e-5, random_seed=42):
+                 n_epochs_online=30, lr_online=0.01, lambda_log_online=1e-5, random_seed=42, device='cuda'):
+        
+        self.device = device
+
         # Core parameters
         self.m = m_coreset_size
         self.n_rff_components = n_rff_components
@@ -25,8 +28,8 @@ class OnlineMMDPlusStreamer:
         self.random_seed = random_seed
         self.num_points_seen = 0
         self._current_batch_idx = -1
-        self._sum_rff_full_stream = torch.zeros(self.n_rff_components, dtype=torch.float32)
-        self.mean_rff_full_stream_torch = torch.zeros(self.n_rff_components, dtype=torch.float32)
+        self._sum_rff_full_stream = torch.zeros(self.n_rff_components, dtype=torch.float32, device=device)
+        self.mean_rff_full_stream_torch = torch.zeros(self.n_rff_components, dtype=torch.float32, device=device)
         self.optimizer = None
         self.sparsity_history = []
 
@@ -49,7 +52,7 @@ class OnlineMMDPlusStreamer:
         if not trainable_logits: return
 
         self.optimizer = optim.Adam(trainable_logits, lr=self.lr_online)
-        candidate_rffs = torch.stack([p['rff'] for p in self.point_buffer])
+        candidate_rffs = torch.stack([p['rff'] for p in self.point_buffer]).to(self.device)
 
         for _ in range(self.n_epochs_online):
             self.optimizer.zero_grad()
@@ -87,7 +90,7 @@ class OnlineMMDPlusStreamer:
         pruning_candidate_indices = sorted_indices[self.m:]
 
         if len(pruning_candidate_indices) <= num_to_prune:
-            indices_to_remove = set(pruning_candidate_indices.numpy())
+            indices_to_remove = set(pruning_candidate_indices.cpu().numpy())
         else:
             provisional_coreset_rffs = torch.stack([self.point_buffer[i]['rff'] for i in provisional_coreset_indices])
             pruning_rffs = torch.stack([self.point_buffer[i]['rff'] for i in pruning_candidate_indices])
@@ -97,7 +100,7 @@ class OnlineMMDPlusStreamer:
             
             indices_to_prune_from_candidates = torch.argsort(redundancy_scores, descending=True)[:num_to_prune]
             final_indices_to_prune = pruning_candidate_indices[indices_to_prune_from_candidates]
-            indices_to_remove = set(final_indices_to_prune.numpy())
+            indices_to_remove = set(final_indices_to_prune.cpu().numpy())
 
         self.point_buffer = [p for i, p in enumerate(self.point_buffer) if i not in indices_to_remove]
 
@@ -109,12 +112,12 @@ class OnlineMMDPlusStreamer:
         if batch_size == 0: return
 
         for i in range(batch_size):
-            rff = torch.from_numpy(self.rbf_sampler.transform(X_batch_np[i:i+1])).float().squeeze(0)
+            rff = torch.from_numpy(self.rbf_sampler.transform(X_batch_np[i:i+1])).float().squeeze(0).to(self.device)
             point_info = {
                 "rff": rff,
                 "global_id": (self._current_batch_idx, i),
                 # ❗ **THE FIX** ❗ Initialize as a 1-D tensor
-                "logit": nn.Parameter(torch.tensor([0.1], dtype=torch.float32))
+                "logit": nn.Parameter(torch.tensor([0.1], dtype=torch.float32, device=self.device))
             }
             self.point_buffer.append(point_info)
 
@@ -174,7 +177,6 @@ class OnlineMMDPlusStreamer:
 
 # The offline method remains for baseline comparison
 def get_coreset_rff_sampler_log(X_train_np, m, kernel_gamma, n_rff_components=500, n_epochs=1000, lr=0.001, lambda_log=1e-4, epsilon=1e-6, random_seed=42):
-    # (Implementation from your prompt)
     torch.manual_seed(random_seed); np.random.seed(random_seed)
     n = X_train_np.shape[0]
     if m > n: m = n
