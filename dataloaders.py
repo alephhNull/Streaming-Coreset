@@ -9,10 +9,26 @@ import torch
 import torch.nn as nn
 import torchvision
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, Subset, TensorDataset
+from torch.utils.data import DataLoader, Subset, ConcatDataset, random_split, TensorDataset, Dataset
 import os
 from utils import train_autoencoder
 from models import Autoencoder
+from torchvision.models import resnet18, ResNet18_Weights
+import joblib
+import hashlib
+
+
+class TransformDataset(Dataset):
+    def __init__(self, base_dataset, transform):
+        self.base = base_dataset
+        self.transform = transform
+
+    def __getitem__(self, idx):
+        x, y = self.base[idx]
+        return self.transform(x), y
+
+    def __len__(self):
+        return len(self.base)
 
 
 def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_dim, device):
@@ -20,6 +36,10 @@ def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_d
     np.random.seed(seed)
     if dataset_name == 'adult':
         X_train, X_val, y_train, y_val = load_adult_data(subset_size)
+    elif dataset_name == 'cifar10':
+        X_train, X_val, y_train, y_val = load_cifar10(subset_size, seed, embedding, embed_dim, device)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
 
     X_train_tensor = torch.from_numpy(X_train).float().to(device)
     y_train_tensor = torch.from_numpy(y_train).long().to(device)
@@ -34,8 +54,89 @@ def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_d
     return train_loader, val_loader, X_train, X_val, y_train, y_val
 
 
-def load_cifar10():
-    pass
+def generate_cache_key(embedding):
+    return hashlib.md5(embedding.encode()).hexdigest()
+
+
+def extract_resnet18_features(dataset, device, batch_size=256, num_workers=4):
+    resnet_transform = transforms.Compose([
+        transforms.Resize(224),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    ])
+    dataset = TransformDataset(dataset, resnet_transform)
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True)
+
+    model = resnet18(weights=ResNet18_Weights.DEFAULT)
+    model = torch.nn.Sequential(*list(model.children())[:-1]).to(device).eval()
+
+    all_feats = []
+    all_labels = []
+    with torch.no_grad():
+        for imgs, labels in loader:
+            imgs = imgs.to(device, non_blocking=True)
+            feats = model(imgs).view(imgs.size(0), -1)
+            all_feats.append(feats.cpu())
+            all_labels.append(labels)
+
+    X = torch.cat(all_feats, dim=0).numpy()
+    y = torch.cat(all_labels, dim=0).numpy()
+    return X, y
+
+
+def load_full_cifar():
+    train_ds = datasets.CIFAR10(root='./data', train=True, download=True)
+    test_ds = datasets.CIFAR10(root='./data', train=False, download=True)
+    return ConcatDataset([train_ds, test_ds])
+
+
+def load_cifar10(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = generate_cache_key(embedding)
+    cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
+
+    # === Load full features from cache or compute ===
+    if os.path.exists(cache_path):
+        print(f"Loading full cached features from {cache_path}")
+        data = joblib.load(cache_path)
+        X_full, y_full = data['X'], data['y']
+    else:
+        print("Extracting features for full CIFAR using pre-trained ResNet18...")
+        full_ds = load_full_cifar()
+        X_full, y_full = extract_resnet18_features(full_ds, device)
+        joblib.dump({'X': X_full, 'y': y_full}, cache_path)
+        print(f"Saved full features to cache: {cache_path}")
+
+    # === Subset and split ===
+    np.random.seed(seed)
+    indices = np.arange(len(X_full))
+    if subset_size and subset_size < len(indices):
+        indices = np.random.choice(indices, subset_size, replace=False)
+
+    X = X_full[indices]
+    y = y_full[indices]
+
+    # Split 80/20
+    n_train = int(0.8 * len(X))
+    perm = np.random.permutation(len(X))  # shuffle before split
+    train_idx, val_idx = perm[:n_train], perm[n_train:]
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val     = X[val_idx], y[val_idx]
+
+    # === Apply PCA if requested ===
+    if embed_dim is not None:
+        pca = PCA(n_components=embed_dim)
+        X_train = pca.fit_transform(X_train)
+        X_val   = pca.transform(X_val)
+        print(f"PCA applied. New feature dimension: {embed_dim}")
+    else:
+        print(f"No PCA. Original feature dimension: {X_train.shape[1]}")
+
+    print(f"Shapes — X_train: {X_train.shape}, X_val: {X_val.shape}")
+    return X_train, X_val, y_train, y_val
+
 
 def load_adult_data(subset_size=500):
   adult = fetch_openml('adult', version=2, as_frame=True)
