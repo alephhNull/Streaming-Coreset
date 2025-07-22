@@ -2,7 +2,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
-from sklearn.datasets import fetch_openml
+from sklearn.datasets import fetch_openml, fetch_kddcup99, fetch_covtype
 import arff
 import pandas as pd
 import torch
@@ -30,14 +30,29 @@ class TransformDataset(Dataset):
     def __len__(self):
         return len(self.base)
 
+# ResNet18 expects 3-channel 224x224 inputs
+class GrayscaleToRGB(torch.nn.Module):
+    def forward(self, x):
+        return x.expand(3, -1, -1)
+
 
 def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_dim, device):
     print(f"Loading dataset: {dataset_name}")
     np.random.seed(seed)
     if dataset_name == 'adult':
         X_train, X_val, y_train, y_val = load_adult_data(subset_size)
+    elif dataset_name == 'electricity':
+        X_train, X_val, y_train, y_val = load_electricity_data(subset_size)
     elif dataset_name == 'cifar10':
         X_train, X_val, y_train, y_val = load_cifar10(subset_size, seed, embedding, embed_dim, device)
+    elif dataset_name == 'mnist':
+        X_train, X_val, y_train, y_val = load_mnist(subset_size, seed, embedding, embed_dim, device)
+    elif dataset_name == 'fashion_mnist':
+        X_train, X_val, y_train, y_val = load_fashion_mnist(subset_size, seed, embedding, embed_dim, device)
+    elif dataset_name == 'kdd99':
+        X_train, X_val, y_train, y_val = load_kdd99_data(subset_size, seed)
+    elif dataset_name == 'covtype':
+        X_train, X_val, y_train, y_val = load_covtype_data(subset_size, seed)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -54,18 +69,122 @@ def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_d
     return train_loader, val_loader, X_train, X_val, y_train, y_val
 
 
-def generate_cache_key(embedding):
-    return hashlib.md5(embedding.encode()).hexdigest()
+
+def load_covtype_data(subset_size, seed):
+    cov = fetch_covtype(as_frame=True)
+    data = cov.data
+    target = cov.target - 1  # Convert from 1-7 to 0-6
+
+    # Optional binary task: make class 2 vs others for imbalance
+    # Uncomment below to do binary classification with imbalance
+    # target = (target == 1).astype(int)  # Class 2 (index 1) vs others
+
+    if subset_size is not None and subset_size < len(data):
+        np.random.seed(seed)
+        idx = np.random.choice(len(data), subset_size, replace=False)
+        data = data.iloc[idx]
+        target = target.iloc[idx]
+
+    scaler = StandardScaler()
+    X = scaler.fit_transform(data)
+    y = target.to_numpy()
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    print(f'Loaded CovType: {len(data)} samples, {X.shape[1]} features')
+    return X_train, X_val, y_train, y_val
+
+
+def load_kdd99_data(subset_size, seed):
+    # Fetch the 10% KDD99 subset
+    raw = fetch_kddcup99(percent10=True, as_frame=True)
+    data = raw.data
+    target = raw.target
+
+    # Convert byte strings to regular strings for categorical processing
+    data = data.map(lambda x: x.decode() if isinstance(x, bytes) else x)
+    target = target.apply(lambda x: x.decode() if isinstance(x, bytes) else x)
+
+    # Optionally subsample the dataset
+    if subset_size is not None and subset_size < len(data):
+        np.random.seed(seed)
+        idx = np.random.choice(len(data), subset_size, replace=False)
+        data = data.iloc[idx]
+        target = target.iloc[idx]
+
+    # Encode labels: normal -> 0, attack -> 1
+    y = (target != 'normal.').astype(int).to_numpy()
+
+    # Separate numerical and categorical features
+    num_cols = data.select_dtypes(include=['int64', 'float64']).columns
+    cat_cols = data.select_dtypes(include=['object']).columns
+
+    scaler = StandardScaler()
+    X_num = scaler.fit_transform(data[num_cols])
+
+    ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+    X_cat = ohe.fit_transform(data[cat_cols])
+
+    X = np.hstack((X_num, X_cat))
+
+    # Split train/val
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    print(f'Loaded KDD99 subset: {len(data)} samples, feature dim: {X.shape[1]}')
+    return X_train, X_val, y_train, y_val
+
+
+
+def load_electricity_data(subset_size=500):
+    electricity = fetch_openml('electricity', version=1, as_frame=True)
+    data_df = electricity.data
+    target = electricity.target
+
+    # Random subset
+    subset_indices = np.random.choice(len(data_df), subset_size, replace=False)
+    data_df = data_df.iloc[subset_indices, :]
+    target = target.iloc[subset_indices]
+
+    # Encode target ('UP'/'DOWN' to 0/1)
+    le_target = LabelEncoder()
+    y = le_target.fit_transform(target)
+
+    # Split into training and validation sets (80/20 split)
+    X_train, X_val, y_train, y_val = train_test_split(data_df, y, test_size=0.2, random_state=42, stratify=y)
+
+    # Identify numerical and categorical columns
+    numerical_cols = X_train.select_dtypes(include=['int64', 'float64']).columns
+    categorical_cols = X_train.select_dtypes(include=['object', 'category']).columns
+    categorical_cols = []
+
+    ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+    ohe.fit(X_train[categorical_cols])
+    X_train_cat = ohe.transform(X_train[categorical_cols])
+    X_val_cat = ohe.transform(X_val[categorical_cols])
+
+    scaler = StandardScaler()
+    scaler.fit(X_train[numerical_cols])
+    X_train_num = scaler.transform(X_train[numerical_cols])
+    X_val_num = scaler.transform(X_val[numerical_cols])
+
+    X_train_processed = np.hstack((X_train_num, X_train_cat))
+    X_val_processed = np.hstack((X_val_num, X_val_cat))
+
+    print(f'Shapes of X_train: {X_train_processed.shape}, X_val: {X_val_processed.shape}')
+    return X_train_processed, X_val_processed, y_train, y_val
+
+
+
+def generate_cache_key(dataset, embedding):
+    key_str = f"{dataset}_{embedding}"
+    return hashlib.md5(key_str.encode()).hexdigest()
 
 
 def extract_resnet18_features(dataset, device, batch_size=256, num_workers=2):
-    resnet_transform = transforms.Compose([
-        transforms.Resize(224),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ])
-    dataset = TransformDataset(dataset, resnet_transform)
-
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=True)
 
@@ -86,6 +205,174 @@ def extract_resnet18_features(dataset, device, batch_size=256, num_workers=2):
     return X, y
 
 
+def load_full_fashion_mnist():
+    train_ds = datasets.FashionMNIST(root='./data', train=True, download=True)
+    test_ds = datasets.FashionMNIST(root='./data', train=False, download=True)
+    return ConcatDataset([train_ds, test_ds])
+
+def load_fashion_mnist(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = generate_cache_key('fashion_mnist', f"{embedding}_{embed_dim}")
+    cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
+
+    if os.path.exists(cache_path):
+        print(f"Loading cached features from {cache_path}")
+        data = joblib.load(cache_path)
+        X_full, y_full = data['X'], data['y']
+    else:
+        print(f"Extracting features for Fashion-MNIST using embedding: {embedding}")
+        full_ds = load_full_fashion_mnist()
+
+        if embedding == 'resnet18':
+            resnet_transform = transforms.Compose([
+                transforms.Resize(224),
+                transforms.ToTensor(),
+                GrayscaleToRGB(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+            ])
+            full_ds = TransformDataset(full_ds, resnet_transform)
+            X_full, y_full = extract_resnet18_features(full_ds, device)
+
+        elif embedding == 'pca':
+            raw_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.view(-1))  # flatten
+            ])
+            full_ds = TransformDataset(full_ds, raw_transform)
+            all_feats, all_labels = [], []
+
+            for img, label in full_ds:
+                all_feats.append(img.numpy())
+                all_labels.append(label)
+            X_full = np.stack(all_feats)
+            y_full = np.array(all_labels)
+
+            if embed_dim is not None:
+                pca = PCA(n_components=embed_dim)
+                X_full = pca.fit_transform(X_full)
+                print(f"PCA applied. Reduced to {embed_dim} dimensions.")
+        else:
+            # No embedding: use raw flattened Fashion-MNIST images
+            raw_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.view(-1))
+            ])
+            full_ds = TransformDataset(full_ds, raw_transform)
+            all_feats, all_labels = [], []
+            for img, label in full_ds:
+                all_feats.append(img.numpy())
+                all_labels.append(label)
+            X_full = np.stack(all_feats)
+            y_full = np.array(all_labels)
+            print(f"Using raw flattened Fashion-MNIST with dim: {X_full.shape[1]}")
+
+        joblib.dump({'X': X_full, 'y': y_full}, cache_path)
+        print(f"Saved features to cache: {cache_path}")
+
+    # Subset and split
+    np.random.seed(seed)
+    indices = np.arange(len(X_full))
+    if subset_size and subset_size < len(indices):
+        indices = np.random.choice(indices, subset_size, replace=False)
+
+    X = X_full[indices]
+    y = y_full[indices]
+
+    n_train = int(0.8 * len(X))
+    perm = np.random.permutation(len(X))
+    train_idx, val_idx = perm[:n_train], perm[n_train:]
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val     = X[val_idx], y[val_idx]
+
+    print(f"Shapes — X_train: {X_train.shape}, X_val: {X_val.shape}")
+    return X_train, X_val, y_train, y_val
+
+
+
+def load_full_mnist():
+    train_ds = datasets.MNIST(root='./data', train=True, download=True)
+    test_ds = datasets.MNIST(root='./data', train=False, download=True)
+    return ConcatDataset([train_ds, test_ds])
+
+
+def load_mnist(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = generate_cache_key('mnist', f"{embedding}_{embed_dim}")
+    cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
+
+    if os.path.exists(cache_path):
+        print(f"Loading cached features from {cache_path}")
+        data = joblib.load(cache_path)
+        X_full, y_full = data['X'], data['y']
+    else:
+        print(f"Extracting features for MNIST using embedding: {embedding}")
+        full_ds = load_full_mnist()
+
+        if embedding == 'resnet18':
+            resnet_transform = transforms.Compose([
+                transforms.Resize(224),
+                transforms.ToTensor(),
+                GrayscaleToRGB(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+            ])
+            full_ds = TransformDataset(full_ds, resnet_transform)
+            X_full, y_full = extract_resnet18_features(full_ds, device)
+
+        elif embedding == 'pca':
+            raw_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.view(-1))  # flatten
+            ])
+            full_ds = TransformDataset(full_ds, raw_transform)
+            all_feats, all_labels = [], []
+
+            for img, label in full_ds:
+                all_feats.append(img.numpy())
+                all_labels.append(label)
+            X_full = np.stack(all_feats)
+            y_full = np.array(all_labels)
+
+            if embed_dim is not None:
+                pca = PCA(n_components=embed_dim)
+                X_full = pca.fit_transform(X_full)
+                print(f"PCA applied. Reduced to {embed_dim} dimensions.")
+        else:
+            # No embedding: use raw flattened MNIST images
+            raw_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.view(-1))
+            ])
+            full_ds = TransformDataset(full_ds, raw_transform)
+            all_feats, all_labels = [], []
+            for img, label in full_ds:
+                all_feats.append(img.numpy())
+                all_labels.append(label)
+            X_full = np.stack(all_feats)
+            y_full = np.array(all_labels)
+            print(f"Using raw flattened MNIST with dim: {X_full.shape[1]}")
+
+        joblib.dump({'X': X_full, 'y': y_full}, cache_path)
+        print(f"Saved features to cache: {cache_path}")
+
+    # Subset and split
+    np.random.seed(seed)
+    indices = np.arange(len(X_full))
+    if subset_size and subset_size < len(indices):
+        indices = np.random.choice(indices, subset_size, replace=False)
+
+    X = X_full[indices]
+    y = y_full[indices]
+
+    n_train = int(0.8 * len(X))
+    perm = np.random.permutation(len(X))
+    train_idx, val_idx = perm[:n_train], perm[n_train:]
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val     = X[val_idx], y[val_idx]
+
+    print(f"Shapes — X_train: {X_train.shape}, X_val: {X_val.shape}")
+    return X_train, X_val, y_train, y_val
+
+
 def load_full_cifar():
     train_ds = datasets.CIFAR10(root='./data', train=True, download=True)
     test_ds = datasets.CIFAR10(root='./data', train=False, download=True)
@@ -94,7 +381,7 @@ def load_full_cifar():
 
 def load_cifar10(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
     os.makedirs(cache_dir, exist_ok=True)
-    cache_key = generate_cache_key(embedding)
+    cache_key = generate_cache_key('cifar10', embedding)
     cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
 
     # === Load full features from cache or compute ===
@@ -105,7 +392,13 @@ def load_cifar10(subset_size, seed, embedding, embed_dim, device, cache_dir="fea
     else:
         print("Extracting features for full CIFAR using pre-trained ResNet18...")
         full_ds = load_full_cifar()
-        X_full, y_full = extract_resnet18_features(full_ds, device)
+        resnet_transform = transforms.Compose([
+            transforms.Resize(224),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+        dataset = TransformDataset(full_ds, resnet_transform)
+        X_full, y_full = extract_resnet18_features(dataset, device)
         joblib.dump({'X': X_full, 'y': y_full}, cache_path)
         print(f"Saved full features to cache: {cache_path}")
 

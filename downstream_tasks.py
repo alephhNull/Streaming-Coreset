@@ -1,6 +1,6 @@
 import numpy as np
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.metrics import accuracy_score, r2_score, mean_squared_error
+from sklearn.metrics import accuracy_score, r2_score, mean_squared_error, f1_score, roc_auc_score
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -20,6 +20,11 @@ def train_classifier(
     if len(unique_classes) < 2:
         print(f"  Warning: Training data contains only one class (label: {unique_classes[0]}). Using constant prediction.")
         y_pred = np.full_like(y_val, fill_value=unique_classes[0])
+        acc = accuracy_score(y_val, y_pred)
+        f1 = f1_score(y_val, y_pred, zero_division=0)
+        auc = float('nan')  # AUC is undefined with one class
+        return acc, auc, f1
+
         return accuracy_score(y_val, y_pred)
 
     clf = LogisticRegression(max_iter=1000, random_state=42)
@@ -31,7 +36,13 @@ def train_classifier(
         clf.fit(X_train, y_train)
 
     y_pred = clf.predict(X_val)
-    return accuracy_score(y_val, y_pred)
+    y_proba = clf.predict_proba(X_val)[:, 1] if clf.classes_.shape[0] == 2 else None
+
+    acc = accuracy_score(y_val, y_pred)
+    f1 = f1_score(y_val, y_pred, average='binary' if clf.classes_.shape[0] == 2 else 'macro', zero_division=0)
+    auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
+
+    return acc, auc, f1
 
 def train_nn_classifier(train_loader: DataLoader, val_loader: DataLoader, device: torch.device, input_dim: int, num_classes: int, epochs: int = 20, lr: float = 0.001) -> float:
     """

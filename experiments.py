@@ -77,8 +77,8 @@ def run_single_experiment(config):
 
     train_loader, val_loader, X_train, X_val, y_train, y_val = load_dataset(dataset_name, ds_size, batch_size, seed, embedding, embed_dim, device)
 
-    acc_whole = train_classifier(X_train, X_val, y_train, y_val)
-    print(f"Baseline (whole dataset) accuracy: {acc_whole:.4f}")
+    acc_whole, auc_whole, f1_whole = train_classifier(X_train, X_val, y_train, y_val)
+    print(f"Baseline (whole dataset) accuracy: {acc_whole:.4f}, auc: {auc_whole:.4f}, f1: {f1_whole:.4f}")
 
     print(f"\n== Coreset size: {core_size}")
 
@@ -86,45 +86,21 @@ def run_single_experiment(config):
         if bm =='OnlineMMDPlus':
             Xc, yc, w = run_onlinemmdplus(train_loader, X_train, y_train, gamma, n_rff, seed, core_size,
                                           buffer_cap, online_epochs, lr_online, lambda_online, device)
-            acc_final = train_classifier(Xc, X_val, yc, y_val)
+            acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
             mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-            print(f"OnlineMMDPlus -> acc:{acc_final:.4f}, mmd:{mmd_final:.6f}")
+            print(f"OnlineMMDPlus -> acc:{acc_final:.4f}, mmd:{mmd_final:.6f}, auc:{auc_final:.4f}, f1:{f1_final:.4f}")
 
         if bm == 'Reservoir':
             accs = []
             mmds = []
+            aucs = []
+            f1s = []
             for t in range(reservoir_trials):
                 Xc, yc, w = run_reservoir(train_loader, X_train, y_train, core_size, seed+t)
-                acc_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 accs.append(acc_final)
                 mmds.append(mmd_final)
-            print(f"Reservoir -> acc:{np.mean(accs):.4f}, mmd:{np.mean(mmds):.6f}")
-
-
-
-if __name__ == "__main__":
-
-    config = {
-    "dataset": "adult",
-    "embedding": None,
-    "embed_dim": None,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
-    "coreset_size": 30,
-    "dataset_subset_size": 2500,
-    "batch_size": 50,
-    "n_rff_components": 1000,
-    "kernel_gamma": 0.1,
-    "buffer_capacity": 150,
-    "random_seed": 10921,
-    "n_epochs_online": 20,
-    "lr_online": 0.1,
-    "lambda_log_online": 5e-5,
-    "reservoir_trials": 10,
-}
-
-
-    # Example config printing
-    print("Using config:", config)
-
-    run_single_experiment(config)
+                aucs.append(auc_final)
+                f1s.append(f1_final)
+            print(f"Reservoir -> acc:{np.mean(accs):.4f}, mmd:{np.mean(mmds):.6f}, auc:{np.mean(aucs):.4f}, f1:{np.mean(f1s):.4f}")

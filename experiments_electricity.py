@@ -1,0 +1,27 @@
+from experiments import run_single_experiment
+
+if __name__ == "__main__":
+
+    config = {
+    "dataset": "electricity",
+    "embedding": None,
+    "embed_dim": None,
+    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "coreset_size": 30,
+    "dataset_subset_size": 10000,
+    "batch_size": 50,
+    "n_rff_components": 1000,
+    "kernel_gamma": 0.1,
+    "buffer_capacity": 150,
+    "random_seed": 918282,
+    "n_epochs_online": 20,
+    "lr_online": 0.1,
+    "lambda_log_online": 1e-5,
+    "reservoir_trials": 10,
+}
+
+
+    # Example config printing
+    print("Using config:", config)
+
+    run_single_experiment(config)
