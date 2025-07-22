@@ -91,10 +91,15 @@ def run_single_experiment(config):
             print(f"OnlineMMDPlus -> acc:{acc_final:.4f}, mmd:{mmd_final:.6f}")
 
         if bm == 'Reservoir':
-            Xc, yc, w = run_reservoir(train_loader, X_train, y_train, core_size, seed)
-            acc_final = train_classifier(Xc, X_val, yc, y_val)
-            mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-            print(f"Reservoir -> acc:{acc_final:.4f}, mmd:{mmd_final:.6f}")
+            accs = []
+            mmds = []
+            for t in range(reservoir_trials):
+                Xc, yc, w = run_reservoir(train_loader, X_train, y_train, core_size, seed+t)
+                acc_final = train_classifier(Xc, X_val, yc, y_val)
+                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
+                accs.append(acc_final)
+                mmds.append(mmd_final)
+            print(f"Reservoir -> acc:{np.mean(accs):.4f}, mmd:{np.mean(mmds):.6f}")
 
 
 
@@ -108,10 +113,10 @@ if __name__ == "__main__":
     "coreset_size": 30,
     "dataset_subset_size": 2500,
     "batch_size": 50,
-    "n_rff_components": 100,
+    "n_rff_components": 1000,
     "kernel_gamma": 0.1,
     "buffer_capacity": 150,
-    "random_seed": 2938741,
+    "random_seed": 10921,
     "n_epochs_online": 20,
     "lr_online": 0.1,
     "lambda_log_online": 5e-5,

@@ -121,11 +121,18 @@ class OnlineMMDPlusStreamer:
             }
             self.point_buffer.append(point_info)
 
-        Z_batch_stacked = torch.stack([p['rff'] for p in self.point_buffer[-batch_size:]])
-        self._sum_rff_full_stream += torch.sum(Z_batch_stacked, dim=0)
-        self.num_points_seen += batch_size
-        self.mean_rff_full_stream_torch = self._sum_rff_full_stream / self.num_points_seen
+
+        alpha = 0.1 # Hyperparameter: how much to weight the new batch.
+        current_batch_mean = torch.mean(torch.stack([p['rff'] for p in self.point_buffer[-batch_size:]]), dim=0)
         
+        # Initialize the mean with the first batch's mean
+        if self.num_points_seen == 0:
+            self.mean_rff_full_stream_torch = current_batch_mean
+        else:
+            self.mean_rff_full_stream_torch = (1 - alpha) * self.mean_rff_full_stream_torch + alpha * current_batch_mean
+
+        self.num_points_seen += batch_size
+
         self._optimize_weights()
 
         if len(self.point_buffer) > self.buffer_capacity:

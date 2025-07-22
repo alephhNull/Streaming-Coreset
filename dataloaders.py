@@ -58,7 +58,7 @@ def generate_cache_key(embedding):
     return hashlib.md5(embedding.encode()).hexdigest()
 
 
-def extract_resnet18_features(dataset, device, batch_size=256, num_workers=4):
+def extract_resnet18_features(dataset, device, batch_size=256, num_workers=2):
     resnet_transform = transforms.Compose([
         transforms.Resize(224),
         transforms.ToTensor(),
