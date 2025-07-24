@@ -52,7 +52,9 @@ def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_d
     elif dataset_name == 'kdd99':
         X_train, X_val, y_train, y_val = load_kdd99_data(subset_size, seed)
     elif dataset_name == 'covtype':
-        X_train, X_val, y_train, y_val = load_covtype_data(subset_size, seed)
+        X_train, X_val, y_train, y_val = load_covtype_data(subset_size, embed_dim, seed)
+    elif dataset_name == 'svhn':
+        X_train, X_val, y_train, y_val = load_svhn(subset_size, seed, embedding, embed_dim, device)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -69,8 +71,104 @@ def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_d
     return train_loader, val_loader, X_train, X_val, y_train, y_val
 
 
+def load_full_svhn():
+    from torchvision import datasets
+    from torch.utils.data import ConcatDataset
 
-def load_covtype_data(subset_size, seed):
+    train_ds = datasets.SVHN(root='./data', split='train', download=True)
+    test_ds = datasets.SVHN(root='./data', split='test', download=True)
+
+    # SVHN uses 10 to represent the digit '0'
+    train_ds.labels[train_ds.labels == 10] = 0
+    test_ds.labels[test_ds.labels == 10] = 0
+
+    return ConcatDataset([train_ds, test_ds])
+
+
+def load_svhn(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
+    import os
+    import numpy as np
+    import joblib
+    from sklearn.decomposition import PCA
+    from torchvision import transforms
+    from torch.utils.data import DataLoader
+
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = generate_cache_key('svhn', f"{embedding}_{embed_dim}")
+    cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
+
+    if os.path.exists(cache_path):
+        print(f"Loading cached features from {cache_path}")
+        data = joblib.load(cache_path)
+        X_full, y_full = data['X'], data['y']
+    else:
+        print(f"Extracting features for SVHN using embedding: {embedding}")
+        full_ds = load_full_svhn()
+
+        if embedding == 'resnet18':
+            resnet_transform = transforms.Compose([
+                transforms.Resize(224),
+                transforms.ToTensor(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+            ])
+            full_ds = TransformDataset(full_ds, resnet_transform)
+            X_full, y_full = extract_resnet18_features(full_ds, device)
+
+        elif embedding == 'pca':
+            raw_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.view(-1))  # flatten
+            ])
+            full_ds = TransformDataset(full_ds, raw_transform)
+            all_feats, all_labels = [], []
+
+            for img, label in full_ds:
+                all_feats.append(img.numpy())
+                all_labels.append(label)
+            X_full = np.stack(all_feats)
+            y_full = np.array(all_labels)
+
+            if embed_dim is not None:
+                pca = PCA(n_components=embed_dim)
+                X_full = pca.fit_transform(X_full)
+                print(f"PCA applied. Reduced to {embed_dim} dimensions.")
+        else:
+            raw_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.view(-1))
+            ])
+            full_ds = TransformDataset(full_ds, raw_transform)
+            all_feats, all_labels = [], []
+            for img, label in full_ds:
+                all_feats.append(img.numpy())
+                all_labels.append(label)
+            X_full = np.stack(all_feats)
+            y_full = np.array(all_labels)
+            print(f"Using raw flattened SVHN with dim: {X_full.shape[1]}")
+
+        joblib.dump({'X': X_full, 'y': y_full}, cache_path)
+        print(f"Saved features to cache: {cache_path}")
+
+    # Subset and split
+    np.random.seed(seed)
+    indices = np.arange(len(X_full))
+    if subset_size and subset_size < len(indices):
+        indices = np.random.choice(indices, subset_size, replace=False)
+
+    X = X_full[indices]
+    y = y_full[indices]
+
+    n_train = int(0.8 * len(X))
+    perm = np.random.permutation(len(X))
+    train_idx, val_idx = perm[:n_train], perm[n_train:]
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val     = X[val_idx], y[val_idx]
+
+    print(f"Shapes — X_train: {X_train.shape}, X_val: {X_val.shape}")
+    return X_train, X_val, y_train, y_val
+
+
+def load_covtype_data(subset_size, embed_dim, seed):
     cov = fetch_covtype(as_frame=True)
     data = cov.data
     target = cov.target - 1  # Convert from 1-7 to 0-6
@@ -88,6 +186,11 @@ def load_covtype_data(subset_size, seed):
     scaler = StandardScaler()
     X = scaler.fit_transform(data)
     y = target.to_numpy()
+
+    if embed_dim is not None:
+        pca = PCA(n_components=embed_dim)
+        X = pca.fit_transform(X)
+        print(f"PCA applied. Reduced to {embed_dim} dimensions.")
 
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
