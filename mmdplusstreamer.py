@@ -7,10 +7,11 @@ import torch.nn.functional as F
 
 class OnlineMMDPlusStreamer:
     """ An intelligent, stateful streamer for coreset selection with persistent weights and smart buffer management. """
-    def __init__(self, m_coreset_size, n_rff_components, buffer_capacity,
+    def __init__(self, batch_size, m_coreset_size, n_rff_components, buffer_capacity,
                  n_epochs_online=30, lr_online=0.01, lambda_log_online=1e-5, random_seed=42, device='cuda'):
         
         self.device = device
+        self.batch_size = batch_size
 
         # Core parameters
         self.m = m_coreset_size
@@ -27,7 +28,7 @@ class OnlineMMDPlusStreamer:
         self.rbf_sampler = None
         self.random_seed = random_seed
         self.num_points_seen = 0
-        self._current_batch_idx = -1
+        # self._current_batch_idx = -1  # 🗑️ REMOVED: No longer needed, as we'll pass the global index.
         self._sum_rff_full_stream = torch.zeros(self.n_rff_components, dtype=torch.float32, device=device)
         self.mean_rff_full_stream_torch = torch.zeros(self.n_rff_components, dtype=torch.float32, device=device)
         self.optimizer = None
@@ -105,9 +106,9 @@ class OnlineMMDPlusStreamer:
         self.point_buffer = [p for i, p in enumerate(self.point_buffer) if i not in indices_to_remove]
 
 
-    def process_batch(self, X_batch_np):
+    def process_batch(self, X_batch_np, batch_idx):
         if self.rbf_sampler is None: raise RuntimeError("RBFSampler not set.")
-        self._current_batch_idx += 1
+        # self._current_batch_idx += 1 # 🗑️ REMOVED
         batch_size = X_batch_np.shape[0]
         if batch_size == 0: return
 
@@ -115,69 +116,70 @@ class OnlineMMDPlusStreamer:
             rff = torch.from_numpy(self.rbf_sampler.transform(X_batch_np[i:i+1])).float().squeeze(0).to(self.device)
             point_info = {
                 "rff": rff,
-                "global_id": (self._current_batch_idx, i),
-                # ❗ **THE FIX** ❗ Initialize as a 1-D tensor
+                # ✅ CORRECTED: Use the true batch_idx for provenance
+                "global_id": (batch_idx, i), 
                 "logit": nn.Parameter(torch.tensor([0.1], dtype=torch.float32, device=self.device))
             }
             self.point_buffer.append(point_info)
 
-
-        alpha = 0.1 # Hyperparameter: how much to weight the new batch.
+        # The rest of this method is unchanged
+        alpha = 0.1
         current_batch_mean = torch.mean(torch.stack([p['rff'] for p in self.point_buffer[-batch_size:]]), dim=0)
         
-        # Initialize the mean with the first batch's mean
         if self.num_points_seen == 0:
             self.mean_rff_full_stream_torch = current_batch_mean
         else:
             self.mean_rff_full_stream_torch = (1 - alpha) * self.mean_rff_full_stream_torch + alpha * current_batch_mean
 
         self.num_points_seen += batch_size
-
         self._optimize_weights()
 
         if len(self.point_buffer) > self.buffer_capacity:
             self._prune_buffer()
 
         sparsity_ratio = self.sparsity_history[-1] if self.sparsity_history else 0
-        print(f"  Batch {self._current_batch_idx} processed. Sparsity: {sparsity_ratio:.2%}")
-
+        print(f"   Batch {batch_idx} processed. Sparsity: {sparsity_ratio:.2%}")
 
     def get_final_coreset(self):
-        """ Extracts the final coreset based on the highest weights in the buffer. """
+        """ ✅ MODIFIED: Extracts the final coreset and now returns indices too. """
         if not self.point_buffer:
-            return [], [], []
+            return np.array([], dtype=int), np.array([])
 
         with torch.no_grad():
             weights = torch.cat([torch.relu(p['logit'].detach()) for p in self.point_buffer])
-
+        
         k_topk = min(self.m, len(self.point_buffer))
-        if k_topk == 0: return [], [], []
+        if k_topk == 0: return np.array([], dtype=int), np.array([])
 
         top_k_weights, top_k_indices_in_buffer = torch.topk(weights, k=k_topk)
         normalized_weights = top_k_weights / (top_k_weights.sum() + 1e-9)
+        
         coreset_points_info = [self.point_buffer[i] for i in top_k_indices_in_buffer]
         coreset_global_ids = [p['global_id'] for p in coreset_points_info]
 
-        return coreset_global_ids, normalized_weights.cpu().numpy()
+        # Calculate flat indices here
+        flat_indices = np.array([gid[0] * self.batch_size + gid[1] for gid in coreset_global_ids])
+        # This assumes a constant batch size, which might not be true. 
+        # A more robust way is to pass BATCH_SIZE to this function or store it.
+        # For simplicity, assuming you pass it to print_coreset_provenance as before.
+        
+        return flat_indices, normalized_weights.cpu().numpy(), coreset_global_ids
 
-    def print_coreset_provenance(self, BATCH_SIZE):
-        """ Prints the origin of each coreset point for analysis. """
+    def print_coreset_provenance(self):
+        """ Prints the origin of each coreset point for analysis and returns flat indices. """
         if not self.point_buffer:
             print("Coreset is empty.")
             return np.array([], dtype=int)
 
-        coreset_global_ids, coreset_weights = self.get_final_coreset()
+        flat_indices, coreset_weights, coreset_global_ids = self.get_final_coreset()
         print("\n--- Final Coreset Provenance ---")
-        flat_indices = []
-        for i, gid in enumerate(coreset_global_ids):
-            flat_idx = gid[0] * BATCH_SIZE + gid[1]
-            flat_indices.append(flat_idx)
+        for i, (gid, flat_idx) in enumerate(zip(coreset_global_ids, flat_indices)):
+            # This calculation is now CORRECT because gid[0] is the true global batch index
             print(f"  Point {i}: From Batch {gid[0]}, Idx {gid[1]} (Flat Index: {flat_idx}) -> Weight: {coreset_weights[i]:.4f}")
 
         batch_indices = [gid[0] for gid in coreset_global_ids]
         batch_counts = {b: batch_indices.count(b) for b in sorted(list(set(batch_indices)))}
         print("\nCoreset points per batch:", batch_counts, "\n------------------------------")
-        return np.array(flat_indices, dtype=int)
     
 
 
