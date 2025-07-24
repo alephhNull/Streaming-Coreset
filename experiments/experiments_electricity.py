@@ -1,4 +1,12 @@
-from experiments import run_single_experiment
+import sys 
+import os
+
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, parent_dir)
+
+from streaming_coreset_runner import run_single_experiment
+from visualize import print_experiment_summary
+
 
 if __name__ == "__main__":
 
@@ -21,7 +29,5 @@ if __name__ == "__main__":
 }
 
 
-    # Example config printing
-    print("Using config:", config)
-
-    run_single_experiment(config)
+    result = run_single_experiment(config)
+    print_experiment_summary(config, result)

@@ -3,10 +3,10 @@ import numpy as np
 from sklearn.kernel_approximation import RBFSampler
 import matplotlib.pyplot as plt
 
-from bcsstreamer import BilevelCoresetSelector
-from ocsstreamer import OCSStreamer
-from reservoirstreamer import ReservoirSamplerBatchStreamer
-from mmdplusstreamer import OnlineMMDPlusStreamer
+from streamers.bcsstreamer import BilevelCoresetSelector
+from streamers.ocsstreamer import OCSStreamer
+from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
+from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_adult_data, load_electricity_tiny
 from utils import calculate_mmd2_exact
 from downstream_tasks import train_classifier

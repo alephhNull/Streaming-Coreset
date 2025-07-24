@@ -55,4 +55,3 @@ def stream_simulator_gen(data_loader, arrival_interval_ms):
 
         except StopIteration:
             break
-    print() # Newline after the simulation progress bar

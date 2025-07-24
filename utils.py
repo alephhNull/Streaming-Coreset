@@ -51,32 +51,3 @@ def calculate_mmd2_approx(X_full, X_coreset, coreset_weights, rbf_sampler):
     return max(0, mmd2)
 
 
-# Function to train the Autoencoder (if not pre-trained)
-def train_autoencoder(model, train_loader, epochs=20, learning_rate=1e-3, device='cpu'):
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    
-    model.to(device)
-    model.train()
-    
-    print("Training Autoencoder...")
-    for epoch in range(epochs):
-        total_loss = 0
-        for data in train_loader:
-            img, _ = data
-            img = img.view(img.size(0), -1).to(device) # Flatten image
-            
-            # Forward pass
-            output = model(img)
-            loss = criterion(output, img)
-            
-            # Backward and optimize
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item() * img.size(0)
-        
-        avg_loss = total_loss / len(train_loader.dataset)
-        print(f'Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}')
-    print("Autoencoder training complete.")

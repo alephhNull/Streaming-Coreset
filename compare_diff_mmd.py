@@ -2,7 +2,7 @@ import argparse
 import numpy as np
 from sklearn.kernel_approximation import RBFSampler
 import matplotlib.pyplot as plt
-from mmdplusstreamer import OnlineMMDPlusStreamer
+from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_adult_data
 from utils import calculate_mmd2_exact, calculate_mmd2_approx
 

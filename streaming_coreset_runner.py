@@ -3,10 +3,10 @@ import numpy as np
 from sklearn.kernel_approximation import RBFSampler
 import matplotlib.pyplot as plt
 from torch import device
-from bcsstreamer import BilevelCoresetSelector
-from ocsstreamer import OCSStreamer
-from reservoirstreamer import ReservoirSamplerBatchStreamer
-from mmdplusstreamer import OnlineMMDPlusStreamer
+from streamers.bcsstreamer import BilevelCoresetSelector
+from streamers.ocsstreamer import OCSStreamer
+from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
+from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_dataset
 from utils import calculate_mmd2_exact
 from downstream_tasks import train_classifier
@@ -92,7 +92,7 @@ def run_onlinemmdplus(train_loader, X_train, y_train, gamma, n_rff, seed, corese
 
 
 def run_reservoir(train_loader, X_train, y_train, coreset_size, seed, arrival_interval_ms):
-    r = ReservoirSamplerBatchStreamer(coreset_size, seed)
+    r = ReservoirSamplerBatchStreamer(coreset_size, train_loader.batch_size, seed)
     
     # run_streaming_algorithm will handle the batch iteration and data accumulation
     Xc, yc, w, metrics = run_streaming_algorithm(r, train_loader, X_train, y_train, arrival_interval_ms)
@@ -120,42 +120,57 @@ def run_single_experiment(config):
     core_size = config['coreset_size']
     arrival_interval_ms = config.get('arrival_interval', None)
 
-    reservoir_trials = config['reservoir_trials']
+    n_mmd_trials = config.get('mmd_trials', 1)
+    n_reservoir_trials = config.get('reservoir_trials', 10)
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
+    experiment_result = {bm: {} for bm in benchmarks}
+
     train_loader, val_loader, X_train, X_val, y_train, y_val = load_dataset(dataset_name, ds_size, batch_size, seed, embedding, embed_dim, device)
 
     acc_whole, auc_whole, f1_whole = train_classifier(X_train, X_val, y_train, y_val)
-    print(f"Baseline (whole dataset) accuracy: {acc_whole:.4f}, auc: {auc_whole:.4f}, f1: {f1_whole:.4f}")
+
+    experiment_result['whole_data'] = {
+        'accuracy': acc_whole,
+        'auc': auc_whole,
+        'f1': f1_whole
+    }
 
     print(f"\n== Coreset size: {core_size}")
 
     for bm in benchmarks:
+        experiment_result[bm] = []
         if bm =='OnlineMMDPlus':
-            Xc, yc, w, metrics = run_onlinemmdplus(train_loader, X_train, y_train, gamma, n_rff, seed, core_size,
-                                          buffer_cap, online_epochs, lr_online, lambda_online, device, arrival_interval_ms)
-            acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
-            mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-            print(f"\nOnlineMMDPlus -> acc:{acc_final:.4f}, mmd:{mmd_final:.6f}, auc:{auc_final:.4f}, f1:{f1_final:.4f}")
-            print(f"  └─ Stream Perf: Batches Processed: {metrics['batches_processed']}, Dropped: {metrics['batches_dropped']}")
-            print(f"  └─ Metrics: Avg Proc Time: {metrics['avg_batch_time_ms']:.2f}ms | "
-                  f"Throughput: {int(metrics['effective_throughput_pps'])} pts/sec | "
-                  f"Data Loss (Velocity): {metrics['velocity_data_loss_pct']:.2f}%")
+            for t in range(n_mmd_trials): 
+                Xc, yc, w, metrics = run_onlinemmdplus(train_loader, X_train, y_train, gamma, n_rff, seed+t, core_size,
+                                              buffer_cap, online_epochs, lr_online, lambda_online, device, arrival_interval_ms)
+                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
+                experiment_result[bm].append({
+                    'trial': t,
+                    'accuracy': acc_final,
+                    'auc': auc_final,
+                    'f1': f1_final,
+                    'mmd': mmd_final,
+                    'streaming_metrics': metrics
+                })
 
         if bm == 'Reservoir':
-            accs = []
-            mmds = []
-            aucs = []
-            f1s = []
-            for t in range(reservoir_trials):
+            for t in range(n_reservoir_trials):
                 Xc, yc, w, metrics = run_reservoir(train_loader, X_train, y_train, core_size, seed+t, arrival_interval_ms)
                 acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                accs.append(acc_final)
-                mmds.append(mmd_final)
-                aucs.append(auc_final)
-                f1s.append(f1_final)
-            print(f"Reservoir -> acc:{np.mean(accs):.4f}, mmd:{np.mean(mmds):.6f}, auc:{np.mean(aucs):.4f}, f1:{np.mean(f1s):.4f}")
+                experiment_result[bm].append({
+                    'trial': t,
+                    'accuracy': acc_final,
+                    'auc': auc_final,
+                    'f1': f1_final,
+                    'mmd': mmd_final,
+                    'streaming_metrics': metrics
+                })
+    
+
+    return experiment_result

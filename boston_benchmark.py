@@ -3,8 +3,8 @@ import numpy as np
 from sklearn.kernel_approximation import RBFSampler
 import matplotlib.pyplot as plt
 
-from reservoirstreamer import ReservoirSamplerBatchStreamer
-from mmdplusstreamer import OnlineMMDPlusStreamer
+from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
+from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_boston
 from utils import calculate_mmd2_exact
 from downstream_tasks import train_regressor
