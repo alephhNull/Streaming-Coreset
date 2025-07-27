@@ -2,8 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Tuple, List
 import numpy as np
 import torch
-from scipy.spatial.distance import cdist
-import threading
+from sklearn.cluster import KMeans
 
 class AbstractStreamingCoreset(ABC):
     """
@@ -44,221 +43,226 @@ class AbstractStreamingCoreset(ABC):
         pass
 
 
-class CAMELStreamer(AbstractStreamingCoreset):
+class FreeSelStreamer(AbstractStreamingCoreset):
     """
-    Implements the CAMEL coreset selection algorithm for streaming data.
+    A streaming coreset selector based on the FreeSel paper.
 
-    This class uses a merge-reduce strategy to maintain a buffer of representative
-    points from the stream. When new data arrives, it's merged with the buffer.
-    If the buffer exceeds its capacity, a greedy coreset selection algorithm
-    (as described in Algorithm 1 of the paper) is run to reduce it back to size.
+    This class implements a coreset selection algorithm for streaming data. It uses a buffer
+    to accumulate data and then applies a selection strategy inspired by the FreeSel paper,
+    which involves identifying semantic patterns (via clustering) and then selecting a diverse
+    subset based on distance-based sampling.
+
+    Attributes:
+        buffer_capacity (int): The maximum number of data points to store in the buffer
+            before running the coreset selection.
+        coreset_size (int): The target size of the coreset to be selected from the buffer.
+        batch_size (int): The number of data points in each incoming batch.
+        num_semantic_patterns (int): The number of clusters (semantic patterns) to identify
+            in the buffered data. This is analogous to the 'K' parameter in the paper.
+        sampling_strategy (str): The strategy for sampling from the semantic patterns.
+            Can be 'prob' for probabilistic distance-based sampling or 'FDS' for
+            farthest-distance sampling.
     """
 
-    def __init__(self, buffer_capacity: int, coreset_size: int, weight_clip_range: Tuple[float, float] = (0.0, 1e9)):
+    def __init__(self, buffer_capacity: int, coreset_size: int, batch_size: int, 
+                 num_semantic_patterns: int = 10, sampling_strategy: str = 'prob'):
         """
-        Initializes the CAMELStreamer.
+        Initializes the FreeSelStreamer.
 
         Args:
-            buffer_capacity (int): The maximum number of points to keep in the buffer.
-            coreset_size (int): The target size of the final coreset.
-            weight_clip_range (Tuple[float, float]): The min and max values for weight clipping.
+            buffer_capacity (int): The maximum size of the data buffer.
+            coreset_size (int): The desired size of the coreset.
+            batch_size (int): The size of incoming data batches.
+            num_semantic_patterns (int): The number of semantic patterns (clusters) to find.
+            sampling_strategy (str): The sampling strategy to use ('prob' or 'FDS').
         """
-        if buffer_capacity < coreset_size:
-            raise ValueError("Buffer capacity must be greater than or equal to the coreset size.")
-
+        if coreset_size > buffer_capacity:
+            raise ValueError("Coreset size cannot be larger than buffer capacity.")
+        
         self.buffer_capacity = buffer_capacity
         self.coreset_size = coreset_size
-        self.weight_clip_range = weight_clip_range
+        self.batch_size = batch_size
+        self.num_semantic_patterns = num_semantic_patterns
+        self.sampling_strategy = sampling_strategy
 
-        self.buffer = np.array([])
-        self.buffer_provenance: List[Tuple[int, int]] = []
-        self.batch_size = -1
-
-        self._final_coreset_indices: np.ndarray = np.array([])
-        self._final_coreset_weights: np.ndarray = np.array([])
-        self._final_coreset_provenance: List[Tuple[int, int]] = []
-
-        self._is_processing = False
-        self._lock = threading.Lock()
-
-
-    def _greedy_coreset_selection(self, data: np.ndarray, target_size: int) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Selects a coreset from the given data using a greedy approach.
-
-        This implements a simplified version of Algorithm 1 from the paper,
-        which minimizes the distance between the full dataset and the coreset.
-
-        Args:
-            data (np.ndarray): The data to select a coreset from.
-            target_size (int): The desired size of the coreset.
-
-        Returns:
-            Tuple containing the indices of the selected coreset points and their calculated weights.
-        """
-        if len(data) <= target_size:
-            # If the data is smaller than the target size, all points are selected
-            indices = np.arange(len(data))
-            weights = np.ones(len(data))
-            return indices, weights
-
-
-        num_points = data.shape[0]
-        # Normalize features to unit length as mentioned in the paper
-        data_normalized = data / (np.linalg.norm(data, axis=1, keepdims=True) + 1e-9)
-
-        # Calculate all pairwise distances once
-        all_distances = cdist(data_normalized, data_normalized, 'euclidean')
-
-        # This will store the minimum distance from each point to a selected coreset point
-        min_distances = np.full(num_points, np.inf)
-        selected_indices = []
-
-        for _ in range(target_size):
-            marginal_gains = np.zeros(num_points)
-            # Create a mask for points not yet selected
-            not_selected_mask = np.ones(num_points, dtype=bool)
-            if selected_indices:
-                not_selected_mask[selected_indices] = False
-            
-            candidate_indices = np.where(not_selected_mask)[0]
-
-            for idx in candidate_indices:
-                # Calculate the potential new minimum distances if this point is added
-                potential_new_min_distances = np.minimum(min_distances, all_distances[:, idx])
-                # The gain is the reduction in the sum of distances
-                marginal_gains[idx] = np.sum(min_distances - potential_new_min_distances)
-            
-            # Select the point with the highest marginal gain
-            best_candidate_idx = np.argmax(marginal_gains)
-            selected_indices.append(best_candidate_idx)
-
-            # Update the minimum distances with the newly selected point
-            min_distances = np.minimum(min_distances, all_distances[:, best_candidate_idx])
-            
-        selected_indices = np.array(selected_indices)
-        
-        # Calculate weights: for each coreset point, count how many data points are closest to it.
-        # This corresponds to w_j = |V_j| in the paper.
-        closest_coreset_point = np.argmin(all_distances[:, selected_indices], axis=1)
-        weights = np.bincount(closest_coreset_point, minlength=target_size)
-        
-        return selected_indices, weights.astype(float)
-
+        self._buffer = np.array([])
+        self._provenance_buffer = []
+        self._final_coreset = []
+        self._final_provenance = []
 
     def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
         """
-        Processes a single batch of data from the stream using the Merge-Reduce strategy.
+        Processes a single batch of data from the stream.
+
+        This method adds the new data to a buffer. If the buffer exceeds its capacity,
+        it triggers the coreset selection process to reduce the buffer size.
+
+        Args:
+            X_batch_np (np.ndarray): The new batch of data points.
+            batch_idx (int): The index of the current batch.
         """
-        if self._is_processing:
-            print(f"Processor is busy. Dropping batch {batch_idx}.")
-            return
-
-        with self._lock:
-            self._is_processing = True
-
-        if self.batch_size == -1:
-            self.batch_size = X_batch_np.shape[0]
-
-        print(f"Processing batch {batch_idx}...")
-
-        # --- Merge Step ---
-        new_provenance = [(batch_idx, i) for i in range(X_batch_np.shape[0])]
-        if self.buffer.size == 0:
-             self.buffer = X_batch_np
+        if self._buffer.size == 0:
+            self._buffer = X_batch_np
         else:
-             self.buffer = np.vstack([self.buffer, X_batch_np])
-        self.buffer_provenance.extend(new_provenance)
+            self._buffer = np.vstack([self._buffer, X_batch_np])
 
-        # --- Reduce Step ---
-        if len(self.buffer) > self.buffer_capacity:
-            print(f"Buffer full ({len(self.buffer)} > {self.buffer_capacity}). Reducing...")
-            
-            # Run coreset selection to reduce the buffer back to capacity
-            indices_to_keep, _ = self._greedy_coreset_selection(self.buffer, self.buffer_capacity)
-            
-            self.buffer = self.buffer[indices_to_keep]
-            self.buffer_provenance = [self.buffer_provenance[i] for i in indices_to_keep]
+        self._provenance_buffer.extend([(batch_idx, i) for i in range(X_batch_np.shape[0])])
 
-        print(f"Finished processing batch {batch_idx}. Buffer size: {len(self.buffer)}")
-        with self._lock:
-            self._is_processing = False
+        if len(self._provenance_buffer) >= self.buffer_capacity:
+            self._select_coreset_from_buffer()
+
+    def _select_coreset_from_buffer(self) -> None:
+        """
+        Selects a coreset from the current buffer using the FreeSel-inspired methodology.
+
+        This method first applies K-Means clustering to find semantic patterns and then uses
+        a distance-based sampling strategy to select a diverse coreset of the desired size.
+        """
+        # 1. Semantic Pattern Extraction (via K-Means clustering)
+        kmeans = KMeans(n_clusters=self.num_semantic_patterns, random_state=0, n_init=10)
+        labels = kmeans.fit_predict(self._buffer)
+        semantic_patterns = kmeans.cluster_centers_
+
+        # 2. Distance-based Sampling
+        if self.sampling_strategy == 'prob':
+            selected_indices = self._probabilistic_sampling(labels, semantic_patterns)
+        elif self.sampling_strategy == 'FDS':
+            selected_indices = self._farthest_distance_sampling(labels, semantic_patterns)
+        else:
+            raise ValueError("Unknown sampling strategy. Choose 'prob' or 'FDS'.")
+        
+        # Update buffer with the selected coreset
+        self._buffer = self._buffer[selected_indices]
+        self._provenance_buffer = [self._provenance_buffer[i] for i in selected_indices]
+
+
+    def _probabilistic_sampling(self, labels: np.ndarray, semantic_patterns: np.ndarray) -> np.ndarray:
+        """
+        Performs probabilistic distance-based sampling.
+
+        This method selects data points with a probability proportional to their distance
+        from the nearest already selected semantic pattern.
+
+        Args:
+            labels (np.ndarray): The cluster labels for each point in the buffer.
+            semantic_patterns (np.ndarray): The cluster centers (semantic patterns).
+
+        Returns:
+            np.ndarray: The indices of the selected coreset points.
+        """
+        selected_indices = []
+        selected_pattern_indices = []
+
+        # Start with a random data point
+        initial_idx = np.random.choice(len(self._provenance_buffer))
+        selected_indices.append(initial_idx)
+        selected_pattern_indices.append(labels[initial_idx])
+
+        while len(selected_indices) < self.coreset_size:
+            min_distances = np.full(self.num_semantic_patterns, np.inf)
+            for i in range(self.num_semantic_patterns):
+                if i not in selected_pattern_indices:
+                    # Calculate distance to the nearest selected pattern
+                    distances_to_selected = np.linalg.norm(semantic_patterns[i] - semantic_patterns[selected_pattern_indices], axis=1)
+                    min_distances[i] = np.min(distances_to_selected)
+
+            # Select next pattern with probability proportional to squared distance
+            probabilities = min_distances**2
+            probabilities /= np.sum(probabilities)
+            next_pattern_idx = np.random.choice(self.num_semantic_patterns, p=probabilities)
+            
+            # Find a data point from the selected pattern
+            candidate_indices = np.where(labels == next_pattern_idx)[0]
+            if len(candidate_indices) > 0:
+                # Add a random point from this new cluster
+                new_idx = np.random.choice(candidate_indices)
+                if new_idx not in selected_indices:
+                    selected_indices.append(new_idx)
+                    selected_pattern_indices.append(next_pattern_idx)
+
+        return np.array(selected_indices)
+
+
+    def _farthest_distance_sampling(self, labels: np.ndarray, semantic_patterns: np.ndarray) -> np.ndarray:
+        """
+        Performs farthest-distance sampling (FDS).
+
+        This method greedily selects the data point whose corresponding semantic pattern is
+        farthest from any already selected patterns.
+
+        Args:
+            labels (np.ndarray): The cluster labels for each point in the buffer.
+            semantic_patterns (np.ndarray): The cluster centers (semantic patterns).
+
+        Returns:
+            np.ndarray: The indices of the selected coreset points.
+        """
+        selected_indices = []
+        selected_pattern_indices = []
+        
+        # Start with a random data point
+        initial_idx = np.random.choice(len(self._provenance_buffer))
+        selected_indices.append(initial_idx)
+        selected_pattern_indices.append(labels[initial_idx])
+        
+        while len(selected_indices) < self.coreset_size:
+            max_min_dist = -1
+            next_pattern_idx = -1
+            
+            for i in range(self.num_semantic_patterns):
+                if i not in selected_pattern_indices:
+                    # Calculate distance to the nearest selected pattern
+                    distances_to_selected = np.linalg.norm(semantic_patterns[i] - semantic_patterns[selected_pattern_indices], axis=1)
+                    min_dist = np.min(distances_to_selected)
+                    
+                    if min_dist > max_min_dist:
+                        max_min_dist = min_dist
+                        next_pattern_idx = i
+            
+            if next_pattern_idx != -1:
+                # Find a data point from the selected pattern
+                candidate_indices = np.where(labels == next_pattern_idx)[0]
+                if len(candidate_indices) > 0:
+                    new_idx = np.random.choice(candidate_indices)
+                    if new_idx not in selected_indices:
+                        selected_indices.append(new_idx)
+                        selected_pattern_indices.append(next_pattern_idx)
+            else:
+                # No more patterns to select
+                break
+                
+        return np.array(selected_indices)
+
 
     def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
         """
-        Selects the final coreset from the current buffer and computes weights and provenance.
+        Returns the final coreset after processing the entire stream.
+
+        This method processes any remaining data in the buffer and then returns the
+        final coreset indices, weights, and provenance.
+
+        Returns:
+            A tuple containing the flattened indices, weights, and provenance of the coreset.
         """
-        with self._lock:
-            if len(self.buffer) == 0:
-                return np.array([]), np.array([]), []
+        # Process any remaining data in the buffer
+        if len(self._provenance_buffer) > self.coreset_size:
+            self._select_coreset_from_buffer()
+        
+        self._final_coreset = self._buffer
+        self._final_provenance = self._provenance_buffer
 
-            print(f"\nSelecting final coreset of size {self.coreset_size} from buffer of size {len(self.buffer)}...")
-            
-            # Select the final coreset from the current buffer
-            coreset_indices_in_buffer, weights = self._greedy_coreset_selection(self.buffer, self.coreset_size)
+        flat_indices = np.array([p[0] * self.batch_size + p[1] for p in self._final_provenance])
+        weights = np.ones(len(self._final_provenance)) / len(self._final_provenance) # Uniform weights
 
-            self._final_coreset_indices = coreset_indices_in_buffer
-            self._final_coreset_provenance = [self.buffer_provenance[i] for i in coreset_indices_in_buffer]
-
-            # As per the paper, scale and clip weights for fair comparison in training
-            if len(coreset_indices_in_buffer)>0:
-                sample_ratio = len(coreset_indices_in_buffer) / len(self.buffer)
-                scaled_weights = weights * sample_ratio
-                self._final_coreset_weights = np.clip(scaled_weights, self.weight_clip_range[0], self.weight_clip_range[1])
-            else:
-                 self._final_coreset_weights = np.array([])
-
-
-            # Calculate flat indices
-            flat_indices = np.array([batch_idx * self.batch_size + local_idx for batch_idx, local_idx in self._final_coreset_provenance])
-
-        return flat_indices, self._final_coreset_weights, self._final_coreset_provenance
+        return flat_indices, weights, self._final_provenance
 
     def print_coreset_provenance(self) -> None:
         """
-        Prints the provenance and weight of each point in the final coreset.
+        Prints the provenance of each point in the final coreset.
         """
-        if len(self._final_coreset_provenance) == 0:
-            print("\nFinal coreset is empty. Call get_final_coreset() first.")
-            return
+        if not self._final_provenance:
+            self.get_final_coreset()
 
-        print("\n--- Final Coreset Provenance ---")
-        for i, (provenance, weight) in enumerate(zip(self._final_coreset_provenance, self._final_coreset_weights)):
-            batch_id, local_id = provenance
-            print(f"Point {i}: From Batch {batch_id}, Index {local_id} -> Weight: {weight:.4f}")
-        print("---------------------------------")
-
-
-if __name__ == '__main__':
-    # --- Example Usage ---
-    # Create a dummy data stream
-    NUM_BATCHES = 20
-    BATCH_SIZE = 100
-    FEATURE_DIM = 10
-    
-    np.random.seed(42)
-    # Create some clusters to make the data redundant
-    centers = np.random.rand(5, FEATURE_DIM) * 10
-    data_stream = []
-    for _ in range(NUM_BATCHES):
-        # Each batch is a mixture of points from the clusters
-        batch_centers = centers[np.random.choice(5, BATCH_SIZE)]
-        batch = batch_centers + np.random.randn(BATCH_SIZE, FEATURE_DIM) * 0.5
-        data_stream.append(batch)
-
-    # Initialize the streamer
-    BUFFER_CAPACITY = 500
-    CORESET_SIZE = 50
-    camel_streamer = CAMELStreamer(buffer_capacity=BUFFER_CAPACITY, coreset_size=CORESET_SIZE)
-
-    # Process the stream
-    for i, batch_data in enumerate(data_stream):
-        camel_streamer.process_batch(batch_data, batch_idx=i)
-        
-    # Get and print the final coreset
-    flat_indices, weights, provenance = camel_streamer.get_final_coreset()
-    camel_streamer.print_coreset_provenance()
-
-    print(f"\nTotal points in final coreset: {len(flat_indices)}")
-    print(f"Shape of flat indices: {flat_indices.shape}")
-    print(f"Shape of weights: {weights.shape}")
+        print("Final Coreset Provenance:")
+        for i, (batch_idx, local_idx) in enumerate(self._final_provenance):
+            print(f"  Point {i}: from Batch {batch_idx}, Index {local_idx}")

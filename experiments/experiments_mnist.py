@@ -15,7 +15,7 @@ if __name__ == "__main__":
     "dataset": "mnist",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["CAMEL","OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["FreeSel","OnlineMMDPlus", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
