@@ -241,37 +241,3 @@ class WCSLStreamer(AbstractStreamingCoreset):
         print("\nCoreset Provenance:")
         for i, (batch_idx, local_idx) in enumerate(self.final_provenance):
             print(f"  Point {i}: Batch {batch_idx}, Index in Batch {local_idx}, Weight: {self.final_weights[i]:.4f}")
-
-
-# if __name__ == '__main__':
-#     # --- Example Usage ---
-#     # Parameters
-#     D = 10  # Data dimension
-#     M = 50  # Target coreset size
-#     BUFFER_CAPACITY = 200
-#     BATCH_SIZE = 40
-#     N_BATCHES = 10
-
-#     # Initialize the streamer
-#     wcsl_streamer = WCSLStreamer(target_coreset_size=M,
-#                                  buffer_capacity=BUFFER_CAPACITY,
-#                                  batch_size=BATCH_SIZE)
-
-#     # Simulate a data stream
-#     print("--- Simulating Data Stream ---")
-#     for i in range(N_BATCHES):
-#         print(f"\nProcessing Batch {i}...")
-#         # Generate a random batch of data
-#         X_batch = np.random.randn(BATCH_SIZE, D)
-#         wcsl_streamer.process_batch(X_batch, batch_idx=i)
-#         print(f"Current buffer size: {wcsl_streamer.buffer.shape[0]}")
-
-#     # Get the final coreset
-#     indices, weights, provenance = wcsl_streamer.get_final_coreset()
-    
-#     print(f"\n--- Final Coreset (size {len(indices)}) ---")
-#     print("Flattened Indices:", indices)
-#     print("Weights:", weights)
-
-#     # Print the provenance
-#     wcsl_streamer.print_coreset_provenance()
