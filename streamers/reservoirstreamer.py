@@ -1,5 +1,5 @@
 import numpy as np
-from abstract_streamer import AbstractStreamingCoreset
+from streamers.abstract_streamer import AbstractStreamingCoreset
 
 class ReservoirSamplerBatchStreamer(AbstractStreamingCoreset):
     """

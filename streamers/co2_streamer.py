@@ -2,8 +2,9 @@ import numpy as np
 import torch
 from abc import ABC, abstractmethod
 from typing import Tuple, List
-import geomloss
 from scipy.optimize import minimize
+import geomloss
+
 
 from streamers.abstract_streamer import AbstractStreamingCoreset
 
@@ -25,7 +26,7 @@ class CO2Streamer(AbstractStreamingCoreset):
     3.  [cite_start]Selecting points and weights via a recombination (moment-matching) procedure[cite: 110, 208].
     """
 
-    def __init__(self, wanted_coreset_size: int, buffer_capacity: int, reg: float = 1.0, theta: int = 3):
+    def __init__(self, wanted_coreset_size: int, buffer_capacity: int, batch_size: int, reg: float = 1.0, theta: int = 3):
         """
         Initializes the CO2Streamer.
 
@@ -40,6 +41,7 @@ class CO2Streamer(AbstractStreamingCoreset):
 
         self.wanted_coreset_size = wanted_coreset_size
         self.buffer_capacity = buffer_capacity
+        self.batch_size = batch_size
         self.reg = reg
         self.theta = theta
 
@@ -103,6 +105,7 @@ class CO2Streamer(AbstractStreamingCoreset):
         
         print(f"Compression complete. New buffer size: {self.buffer.shape[0]}")
 
+
     def _run_co2(self, X: np.ndarray, r: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Executes the core CO2-recombination algorithm on the input data X.
@@ -138,7 +141,7 @@ class CO2Streamer(AbstractStreamingCoreset):
         coreset_indices, coreset_weights = self._find_coreset_points_and_weights(U, r)
 
         return coreset_indices, coreset_weights
-
+    
     def _compute_sinkhorn_kernel(self, X: np.ndarray) -> np.ndarray:
         """Computes the Sinkhorn kernel matrix (transport plan) using geomloss."""
         X_t = torch.from_numpy(X).float()
@@ -160,8 +163,46 @@ class CO2Streamer(AbstractStreamingCoreset):
         
         # The kernel is n * pi
         kernel = X.shape[0] * torch.exp(log_pi)
+        kernel = kernel.reshape((X.shape[0], X.shape[0]))
         
         return kernel.numpy()
+    
+
+    def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
+        """
+        Processes a new batch of data, assuming a fixed batch size to calculate
+        global indices.
+
+        Args:
+            X_batch_np (np.ndarray): The data batch.
+            batch_idx (int): The identifier for this batch from the original stream.
+        """
+        # Defensive check: ensure the incoming batch matches the configured size,
+        # unless it's the very last, potentially smaller batch.
+        if X_batch_np.shape[0] != self.batch_size:
+            print(f"Warning: Batch {batch_idx} has size {X_batch_np.shape[0]}, "
+                  f"which differs from configured batch_size {self.batch_size}.")
+
+        # --- Key Change: Calculate global start index internally ---
+        global_start_idx = batch_idx * self.batch_size
+        
+        current_batch_size = X_batch_np.shape[0]
+        new_provenance = [(batch_idx, i) for i in range(current_batch_size)]
+        new_global_indices = list(range(global_start_idx, global_start_idx + current_batch_size))
+
+        if self.buffer.shape[0] == 0:
+            self.buffer = X_batch_np
+            self.provenance = new_provenance
+            self.global_indices = new_global_indices
+        else:
+            self.buffer = np.vstack([self.buffer, X_batch_np])
+            self.provenance.extend(new_provenance)
+            self.global_indices.extend(new_global_indices)
+
+        print(f"Processed batch {batch_idx}. Buffer size: {self.buffer.shape[0]}/{self.buffer_capacity}")
+
+        if self.buffer.shape[0] > self.buffer_capacity:
+            self._compress_buffer()
 
 
     def _nystrom_approx(self, K: np.ndarray, r: int, theta: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -284,81 +325,28 @@ class CO2Streamer(AbstractStreamingCoreset):
         if self.weights.shape[0] != self.buffer.shape[0]:
             n_final = self.buffer.shape[0]
             self.weights = np.ones(n_final) / n_final if n_final > 0 else np.array([])
-            
-        return (
-            self.buffer,
-            np.array(self.global_indices),
-            self.weights,
-            self.provenance
-        )
+
+        normalized_weights = self.weights / (np.sum(self.weights) + 1e-9)
+
+        return np.array(self.global_indices), normalized_weights, self.provenance
+
 
     def print_coreset_provenance(self) -> None:
         """
         Prints the detailed origin and weight of each point in the final coreset.
         """
-        coreset, global_ids, weights, provenance = self.get_final_coreset()
-
-        if coreset.shape[0] == 0:
-            print("Coreset is empty.")
-            return
+        global_ids, weights, provenance = self.get_final_coreset()
 
         print("\n--- Final Coreset Provenance ---")
-        print(f"Total points in coreset: {coreset.shape[0]}")
         print("-" * 30)
         header = f"{'Global ID':<12} {'Batch ID':<10} {'Index in Batch':<16} {'Weight':<15}"
         print(header)
         print("=" * len(header))
 
-        for i in range(coreset.shape[0]):
+        for i in range(self.wanted_coreset_size):
             global_id = global_ids[i]
             batch_id, local_id = provenance[i]
             weight = weights[i]
             print(f"{global_id:<12} {batch_id:<10} {local_id:<16} {weight:<15.6f}")
         print("-" * 30)
 
-
-# --- Example Usage ---
-if __name__ == '__main__':
-    # --- Configuration ---
-    D = 10  # Dimension of data
-    NUM_BATCHES = 20
-    BATCH_SIZE = 100
-    
-    # Coreset parameters
-    WANTED_CORESET_SIZE = 50
-    BUFFER_CAPACITY = 200
-    [cite_start]SINKHORN_REG = 2.0 * D # As suggested in the paper's experiments [cite: 284]
-
-    # --- Data Stream Simulation ---
-    # Create a dummy data stream from a mixture of Gaussians
-    np.random.seed(42)
-    # The stream will have 3 clusters
-    centers = [np.random.randn(D) * 5 for _ in range(3)]
-    
-    def data_generator(num_batches, batch_size):
-        for i in range(num_batches):
-            # Pick a random center for this batch
-            center = centers[i % len(centers)]
-            batch_data = np.random.randn(batch_size, D) + center
-            yield batch_data, i
-
-    # --- Initialize and run the streamer ---
-    streamer = CO2Streamer(
-        wanted_coreset_size=WANTED_CORESET_SIZE,
-        buffer_capacity=BUFFER_CAPACITY,
-        reg=SINKHORN_REG
-    )
-
-    data_stream = data_generator(NUM_BATCHES, BATCH_SIZE)
-
-    for batch, batch_idx in data_stream:
-        streamer.process_batch(batch, batch_idx)
-
-    # --- Get and print the final results ---
-    streamer.print_coreset_provenance()
-
-    # You can also get the final data directly
-    final_coreset_points, _, final_weights, _ = streamer.get_final_coreset()
-    print(f"\nShape of the final coreset data: {final_coreset_points.shape}")
-    print(f"Shape of the final coreset weights: {final_weights.shape}")
-    print(f"Sum of final weights: {np.sum(final_weights):.2f}")

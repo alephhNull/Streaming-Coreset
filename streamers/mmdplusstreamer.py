@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from abstract_streamer import AbstractStreamingCoreset
+from streamers.abstract_streamer import AbstractStreamingCoreset
 
 class OnlineMMDPlusStreamer(AbstractStreamingCoreset):
     """ An intelligent, stateful streamer for coreset selection with persistent weights and smart buffer management. """

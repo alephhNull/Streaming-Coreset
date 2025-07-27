@@ -6,6 +6,7 @@ from torch import device
 from streamers.bcsstreamer import BilevelCoresetSelector
 from streamers.ocsstreamer import OCSStreamer
 from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
+from streamers.co2_streamer import CO2Streamer
 from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_dataset
 from utils import calculate_mmd2_exact, calculate_wass_distance
@@ -100,6 +101,20 @@ def run_reservoir(train_loader, X_train, y_train, coreset_size, seed, arrival_in
     return Xc, yc, w, metrics
 
 
+def run_co2(train_loader, X_train, y_train, coreset_size, buffer_capacity, seed, arrival_interval_ms):
+    SINKHORN_REG = 2 * X_train.shape[1]
+
+    streamer = CO2Streamer(
+        wanted_coreset_size=coreset_size,
+        buffer_capacity=buffer_capacity,
+        batch_size=train_loader.batch_size,
+        reg=SINKHORN_REG
+    )
+    
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(streamer, train_loader, X_train, y_train, arrival_interval_ms)
+    
+    return Xc, yc, w, metrics
 
 def run_single_experiment(config):
     dataset_name = config['dataset']
@@ -121,6 +136,7 @@ def run_single_experiment(config):
     arrival_interval_ms = config.get('arrival_interval', None)
 
     n_mmd_trials = config.get('mmd_trials', 1)
+    n_co2_trials = config.get('co2_trials', 1)
     n_reservoir_trials = config.get('reservoir_trials', 10)
 
 
@@ -175,6 +191,22 @@ def run_single_experiment(config):
                     'W1': W1_final,
                     'streaming_metrics': metrics
                 })
-    
+            
+        if bm == 'CO2':
+            for t in range(n_co2_trials):
+                Xc, yc, w, metrics = run_co2(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
+                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
+                W1_final = calculate_wass_distance(X_train, Xc, w)
+                experiment_result[bm].append({
+                    'trial': t,
+                    'accuracy': acc_final,
+                    'auc': auc_final,
+                    'f1': f1_final,
+                    'mmd': mmd_final,
+                    'W1': W1_final,
+                    'streaming_metrics': metrics
+                })
+
 
     return experiment_result
