@@ -108,6 +108,7 @@ def run_co2(train_loader, X_train, y_train, coreset_size, buffer_capacity, seed,
         wanted_coreset_size=coreset_size,
         buffer_capacity=buffer_capacity,
         batch_size=train_loader.batch_size,
+        random_seed=seed,
         reg=SINKHORN_REG
     )
     

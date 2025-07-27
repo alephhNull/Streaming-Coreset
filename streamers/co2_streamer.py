@@ -26,7 +26,7 @@ class CO2Streamer(AbstractStreamingCoreset):
     3.  [cite_start]Selecting points and weights via a recombination (moment-matching) procedure[cite: 110, 208].
     """
 
-    def __init__(self, wanted_coreset_size: int, buffer_capacity: int, batch_size: int, reg: float = 1.0, theta: int = 3):
+    def __init__(self, wanted_coreset_size: int, buffer_capacity: int, batch_size: int, random_seed: int, reg: float = 1.0, theta: int = 3):
         """
         Initializes the CO2Streamer.
 
@@ -44,6 +44,7 @@ class CO2Streamer(AbstractStreamingCoreset):
         self.batch_size = batch_size
         self.reg = reg
         self.theta = theta
+        self.random_seed = random_seed
 
         # Buffer to store data points as they arrive
         self.buffer: np.ndarray = np.array([])
@@ -57,6 +58,10 @@ class CO2Streamer(AbstractStreamingCoreset):
         
         # Counter for assigning a unique global index to each incoming data point
         self.global_idx_counter = 0
+        
+        if random_seed is not None:
+            np.random.seed(random_seed)
+            torch.manual_seed(random_seed)
 
     def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
         """
