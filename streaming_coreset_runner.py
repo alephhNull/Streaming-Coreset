@@ -8,7 +8,7 @@ from streamers.ocsstreamer import OCSStreamer
 from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
 from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_dataset
-from utils import calculate_mmd2_exact
+from utils import calculate_mmd2_exact, calculate_wass_distance
 from downstream_tasks import train_classifier
 from streaming_utils import stream_simulator_gen
 import time
@@ -149,12 +149,14 @@ def run_single_experiment(config):
                                               buffer_cap, online_epochs, lr_online, lambda_online, device, arrival_interval_ms)
                 acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
+                W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
                     'trial': t,
                     'accuracy': acc_final,
                     'auc': auc_final,
                     'f1': f1_final,
                     'mmd': mmd_final,
+                    'W1': W1_final,
                     'streaming_metrics': metrics
                 })
 
@@ -163,12 +165,14 @@ def run_single_experiment(config):
                 Xc, yc, w, metrics = run_reservoir(train_loader, X_train, y_train, core_size, seed+t, arrival_interval_ms)
                 acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
+                W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
                     'trial': t,
                     'accuracy': acc_final,
                     'auc': auc_final,
                     'f1': f1_final,
                     'mmd': mmd_final,
+                    'W1': W1_final,
                     'streaming_metrics': metrics
                 })
     

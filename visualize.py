@@ -31,6 +31,7 @@ def print_experiment_summary(config: dict, result: dict, config_keys=None):
             aucs = [r['auc'] for r in results if not np.isnan(r['auc'])]
             f1s = [r['f1'] for r in results]
             mmds = [r['mmd'] for r in results]
+            wds = [r['W1'] for r in results]
 
             # Get streaming metric keys from the first trial
             metric_keys = results[0]['streaming_metrics'].keys()
@@ -46,6 +47,7 @@ def print_experiment_summary(config: dict, result: dict, config_keys=None):
                 round(np.mean(aucs), 4) if aucs else 'nan',
                 round(np.mean(f1s), 4),
                 round(np.mean(mmds), 6),
+                round(np.mean(wds), 6),
                 round(avg_metrics.get('avg_batch_time_ms', 0.0), 2),
                 round(avg_metrics.get('effective_throughput_pps', 0.0), 2),
                 round(avg_metrics.get('velocity_data_loss_pct', 0.0), 2),
@@ -54,7 +56,7 @@ def print_experiment_summary(config: dict, result: dict, config_keys=None):
             ])
 
     headers = [
-        "Benchmark", "Accuracy", "AUC", "F1", "MMD",
+        "Benchmark", "Accuracy", "AUC", "F1", "MMD", "1-Wasser",
         "Avg Time (ms)", "Throughput (pps)", "Loss (%)", "Processed", "Dropped"
     ]
 

@@ -1,6 +1,7 @@
 import numpy as np
+from abstract_streamer import AbstractStreamingCoreset
 
-class ReservoirSamplerBatchStreamer:
+class ReservoirSamplerBatchStreamer(AbstractStreamingCoreset):
     """
     Implements batch-wise reservoir sampling for a data stream.
 

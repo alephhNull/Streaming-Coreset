@@ -4,8 +4,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from abstract_streamer import AbstractStreamingCoreset
 
-class OnlineMMDPlusStreamer:
+class OnlineMMDPlusStreamer(AbstractStreamingCoreset):
     """ An intelligent, stateful streamer for coreset selection with persistent weights and smart buffer management. """
     def __init__(self, batch_size, m_coreset_size, n_rff_components, buffer_capacity,
                  n_epochs_online=30, lr_online=0.01, lambda_log_online=1e-5, random_seed=42, device='cuda'):
