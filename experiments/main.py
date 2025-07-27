@@ -13,7 +13,7 @@ if __name__ == "__main__":
             "dataset": "adult",
             "embedding": None,
             "embed_dim": None,
-            "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+            "benchmarks": ["OnlineMMDPlus", "CO2", "Reservoir"],  # only these
             "coreset_size": 30,
             "dataset_subset_size": 2500,
             "batch_size": 50,
@@ -25,12 +25,13 @@ if __name__ == "__main__":
             "lr_online": 0.1,
             "lambda_log_online": 5e-5,
             "reservoir_trials": 10,
+            "co2_trials": 5
         },
         {
     "dataset": "cifar10",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "CO2", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -42,12 +43,13 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 1e-7,
     "reservoir_trials": 10,
+    "co2_trials": 5
 },
 {
     "dataset": "covtype",
     "embedding": None,
     "embed_dim": 10,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "CO2","Reservoir"],  # only these
     "coreset_size": 30,
     "dataset_subset_size": 10000,
     "batch_size": 50,
@@ -59,12 +61,13 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 1e-7,
     "reservoir_trials": 10,
+    "co2_trials": 5
 },
 {
     "dataset": "electricity",
     "embedding": None,
     "embed_dim": None,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "CO2", "Reservoir"],  # only these
     "coreset_size": 30,
     "dataset_subset_size": 10000,
     "batch_size": 50,
@@ -76,12 +79,13 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 1e-5,
     "reservoir_trials": 10,
+    "co2_trials": 5
 },
 {
     "dataset": "fashion_mnist",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "CO2", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -93,12 +97,13 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 1e-7,
     "reservoir_trials": 10,
+    "co2_trials": 5
 },
 {
     "dataset": "kdd99",
     "embedding": None,
     "embed_dim": None,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "CO2", "Reservoir"],  # only these
     "coreset_size": 20,
     "dataset_subset_size": 10000,
     "batch_size": 50,
@@ -110,12 +115,13 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 5e-5,
     "reservoir_trials": 10,
+    "co2_trials": 5
 },
 {
     "dataset": "mnist",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "CO2", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -127,12 +133,13 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 1e-7,
     "reservoir_trials": 10,
+    "co2_trials": 5
 },
 {
     "dataset": "svhn",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "CO2", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -144,6 +151,7 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 1e-7,
     "reservoir_trials": 10,
+    "co2_trials": 5
 }
     ]
 

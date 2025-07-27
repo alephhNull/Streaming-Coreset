@@ -21,7 +21,7 @@ def train_classifier(
         print(f"  Warning: Training data contains only one class (label: {unique_classes[0]}). Using constant prediction.")
         y_pred = np.full_like(y_val, fill_value=unique_classes[0])
         acc = accuracy_score(y_val, y_pred)
-        f1 = f1_score(y_val, y_pred, zero_division=0)
+        f1 = float('nan')
         auc = float('nan')  # AUC is undefined with one class
         return acc, auc, f1
 
