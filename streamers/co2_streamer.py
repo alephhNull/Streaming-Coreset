@@ -58,12 +58,12 @@ class CO2Streamer(AbstractStreamingCoreset):
         
         # Counter for assigning a unique global index to each incoming data point
         self.global_idx_counter = 0
-        
+
         if random_seed is not None:
             np.random.seed(random_seed)
             torch.manual_seed(random_seed)
 
-    def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         """
         Processes a new batch of data, adding it to the buffer and running
         compression if the buffer exceeds its capacity.

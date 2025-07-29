@@ -22,7 +22,7 @@ class ReservoirSamplerBatchStreamer(AbstractStreamingCoreset):
         self.points_seen = 0
         self.rng = np.random.default_rng(random_seed) # Use modern numpy random generator
 
-    def process_batch(self, X_batch_np, batch_idx):
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         """
         Processes a single batch of data using the reservoir sampling algorithm.
 

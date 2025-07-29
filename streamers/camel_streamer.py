@@ -112,7 +112,7 @@ class CAMELStreamer(AbstractStreamingCoreset):
         return selected_indices, weights.astype(float)
 
 
-    def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         """
         Processes a single batch of data from the stream using the Merge-Reduce strategy.
         """

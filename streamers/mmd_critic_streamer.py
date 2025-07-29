@@ -139,7 +139,7 @@ class MMDCriticStreamer(AbstractStreamingCoreset):
 
         return new_buffer, new_provenance
 
-    def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         """
         Processes a new batch of data, adding it to the buffer and running
         coreset selection if the buffer capacity is exceeded.

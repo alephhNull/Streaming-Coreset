@@ -56,7 +56,7 @@ class FreeSelStreamer(AbstractStreamingCoreset):
             torch.manual_seed(random_seed)
             np.random.seed(random_seed)
 
-    def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         """
         Processes a single batch of data from the stream.
 

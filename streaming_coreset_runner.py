@@ -12,6 +12,7 @@ from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from streamers.wcsl_streamer import WCSLStreamer
 from streamers.camel_streamer import CAMELStreamer
 from streamers.freesel_streamer import FreeSelStreamer
+from streamers.gss_streamer import GSSStreamer
 
 from dataloaders import load_dataset
 from utils import calculate_mmd2_exact, calculate_wass_distance
@@ -30,13 +31,14 @@ def run_streaming_algorithm(streamer, train_loader, X_train, y_train, arrival_in
     # Use the new high-velocity simulator instead of the raw loader
     stream_simulator = stream_simulator_gen(train_loader, arrival_interval_ms)
 
-    for batch_idx, (batch_x, _), stats in stream_simulator:
+    for batch_idx, (batch_x, batch_y), stats in stream_simulator:
         batch_np = batch_x.cpu().numpy()
-        
+        batch_y_np = batch_y.cpu().numpy()
+
         batch_start_time = time.monotonic()
         if batch_np.shape[0]:
             # ✅ CORRECTED: Pass the global batch_idx to the streamer
-            streamer.process_batch(batch_np, batch_idx)
+            streamer.process_batch(batch_np, batch_y_np, batch_idx)
         batch_end_time = time.monotonic()
         
         batch_processing_times.append(batch_end_time - batch_start_time)
@@ -177,6 +179,21 @@ def run_freesel(train_loader, X_train, y_train, coreset_size, buffer_capacity, s
 
     return Xc, yc, w, metrics
 
+def run_gss(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capacity, seed, arrival_interval_ms):
+
+
+    # --- Setup ---
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    gss_streamer = GSSStreamer(coreset_size, buffer_capacity, X_train.shape[1], n_classes, device,
+                                train_loader.batch_size, random_seed=seed)
+
+
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(gss_streamer, train_loader, X_train, y_train, arrival_interval_ms)
+
+    return Xc, yc, w, metrics
+
 def run_single_experiment(config):
     dataset_name = config['dataset']
     ds_size = config['dataset_subset_size']
@@ -184,6 +201,7 @@ def run_single_experiment(config):
     embedding = config['embedding']
     embed_dim = config['embed_dim']
     batch_size = config['batch_size']
+    n_classes = config.get('n_classes', 2)
 
     n_rff = config['n_rff_components']
     gamma = config['kernel_gamma']
@@ -202,6 +220,7 @@ def run_single_experiment(config):
     n_mmd_critic_trials = config.get('mmd_critic_trials', 1)
     n_camel_trials = config.get('camel_trials', 1)
     n_freesel_trials = config.get('freesel_trials', 1)
+    n_gss_trials = config.get('gss_trials', 1)
     n_reservoir_trials = config.get('reservoir_trials', 10)
 
 
@@ -324,6 +343,22 @@ def run_single_experiment(config):
         if bm == 'FreeSel':
             for t in range(n_freesel_trials):
                 Xc, yc, w, metrics = run_freesel(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
+                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
+                W1_final = calculate_wass_distance(X_train, Xc, w)
+                experiment_result[bm].append({
+                    'trial': t,
+                    'accuracy': acc_final,
+                    'auc': auc_final,
+                    'f1': f1_final,
+                    'mmd': mmd_final,
+                    'W1': W1_final,
+                    'streaming_metrics': metrics
+                })
+            
+        if bm == 'GSS':
+            for t in range(n_gss_trials):
+                Xc, yc, w, metrics = run_gss(train_loader, X_train, y_train, n_classes, core_size, buffer_cap, seed+t, arrival_interval_ms)
                 acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)

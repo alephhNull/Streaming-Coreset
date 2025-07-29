@@ -107,7 +107,7 @@ class OnlineMMDPlusStreamer(AbstractStreamingCoreset):
         self.point_buffer = [p for i, p in enumerate(self.point_buffer) if i not in indices_to_remove]
 
 
-    def process_batch(self, X_batch_np, batch_idx):
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         if self.rbf_sampler is None: raise RuntimeError("RBFSampler not set.")
         # self._current_batch_idx += 1 # 🗑️ REMOVED
         batch_size = X_batch_np.shape[0]

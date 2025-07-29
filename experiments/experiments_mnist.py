@@ -15,7 +15,7 @@ if __name__ == "__main__":
     "dataset": "mnist",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["FreeSel","OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -27,6 +27,7 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 1e-7,
     "reservoir_trials": 10,
+    "n_classes": 10
 }
 
 

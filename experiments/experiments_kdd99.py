@@ -26,6 +26,7 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 5e-5,
     "reservoir_trials": 10,
+    "n_classes": 2
 }
 
 

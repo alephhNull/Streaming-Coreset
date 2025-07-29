@@ -45,7 +45,7 @@ class WCSLStreamer(AbstractStreamingCoreset):
             np.random.seed(random_seed)
             torch.manual_seed(random_seed)
 
-    def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         if self.is_processing:
             print(f"Skipping batch {batch_idx} as a coreset selection is already in progress.")
             return
