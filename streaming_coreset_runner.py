@@ -13,6 +13,7 @@ from streamers.wcsl_streamer import WCSLStreamer
 from streamers.camel_streamer import CAMELStreamer
 from streamers.freesel_streamer import FreeSelStreamer
 from streamers.gss_streamer import GSSStreamer
+from streamers.ssd_streamer import SSDStreamerGeneric
 
 from dataloaders import load_dataset
 from utils import calculate_mmd2_exact, calculate_wass_distance
@@ -194,6 +195,21 @@ def run_gss(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capa
 
     return Xc, yc, w, metrics
 
+
+def run_ssd(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capacity, seed, arrival_interval_ms):
+    ssd_streamer = SSDStreamerGeneric(
+        buffer_capacity=buffer_capacity,
+        target_coreset_size=coreset_size,
+        num_classes=n_classes,
+        random_seed=seed,
+        feature_dim=X_train.shape[1]
+    )
+
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(ssd_streamer, train_loader, X_train, y_train, arrival_interval_ms, verbose=True)
+
+    return Xc, yc, w, metrics
+
 def run_single_experiment(config):
     dataset_name = config['dataset']
     ds_size = config['dataset_subset_size']
@@ -221,6 +237,7 @@ def run_single_experiment(config):
     n_camel_trials = config.get('camel_trials', 1)
     n_freesel_trials = config.get('freesel_trials', 1)
     n_gss_trials = config.get('gss_trials', 1)
+    n_ssd_trials = config.get('ssd_trials', 1)
     n_reservoir_trials = config.get('reservoir_trials', 10)
 
 
@@ -359,6 +376,22 @@ def run_single_experiment(config):
         if bm == 'GSS':
             for t in range(n_gss_trials):
                 Xc, yc, w, metrics = run_gss(train_loader, X_train, y_train, n_classes, core_size, buffer_cap, seed+t, arrival_interval_ms)
+                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
+                W1_final = calculate_wass_distance(X_train, Xc, w)
+                experiment_result[bm].append({
+                    'trial': t,
+                    'accuracy': acc_final,
+                    'auc': auc_final,
+                    'f1': f1_final,
+                    'mmd': mmd_final,
+                    'W1': W1_final,
+                    'streaming_metrics': metrics
+                })
+
+        if bm == 'SSD':
+            for t in range(n_ssd_trials):
+                Xc, yc, w, metrics = run_ssd(train_loader, X_train, y_train, n_classes, core_size, buffer_cap, seed+t, arrival_interval_ms)
                 acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)

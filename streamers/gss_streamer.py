@@ -153,28 +153,3 @@ class SimpleNet(nn.Module):
         x = F.relu(self.fc2(x))
         return self.fc3(x)
 
-# if __name__ == "__main__":
-#     # Example usage
-#     INPUT_DIM = 10
-#     NUM_CLASSES = 2
-#     CORESET_SIZE = 20
-#     BUFFER_CAPACITY = 100
-#     N_SAMPLES = 10
-#     BATCH_SIZE = 10
-#     NUM_BATCHES = 25
-
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     model = SimpleNet(INPUT_DIM, NUM_CLASSES).to(device)
-#     gss = GSSGreedyStreamer(CORESET_SIZE,
-#                              BUFFER_CAPACITY,
-#                              N_SAMPLES,
-#                              model,
-#                              BATCH_SIZE,
-#                              random_seed=42)
-
-#     for batch_idx in range(NUM_BATCHES):
-#         X = np.random.rand(BATCH_SIZE, INPUT_DIM).astype(float)
-#         y = np.random.randint(0, NUM_CLASSES, size=(BATCH_SIZE,))
-#         gss.process_batch(X, y, batch_idx)
-
-#     gss.print_coreset_provenance()
