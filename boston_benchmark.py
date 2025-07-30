@@ -7,7 +7,7 @@ from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
 from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_boston
 from utils import calculate_mmd2_exact
-from downstream_tasks import train_regressor
+from downstream_tasks import train_linear_regression
 
 def run_experiment(config):
     # Unpack config
@@ -34,7 +34,7 @@ def run_experiment(config):
     rbf = RBFSampler(gamma=gamma, n_components=n_rff, random_state=42)
     rbf.fit(X_train)
 
-    rmse_whole = train_regressor(X_train, X_val, y_train, y_val)
+    rmse_whole = train_linear_regression(X_train, X_val, y_train, y_val)
     print(f"Baseline (whole dataset) RMSE: {rmse_whole:.4f}")
 
     # Initialize results structure
@@ -61,7 +61,7 @@ def run_experiment(config):
             idxs = streamer.print_coreset_provenance(batch_size)
             _, w = streamer.get_final_coreset()
             Xc, yc = X_train[idxs], y_train[idxs]
-            rmse = train_regressor(Xc, X_val, yc, y_val)
+            rmse = train_linear_regression(Xc, X_val, yc, y_val)
             mmd = calculate_mmd2_exact(X_train, Xc, w, gamma)
             results['OnlineMMDPlus_RMSE'].append(rmse)
             results['OnlineMMDPlus_MMD'].append(mmd)
@@ -77,7 +77,7 @@ def run_experiment(config):
                     size = min(batch_size, n_total - start)
                     r.process_batch(start, size)
                 Xc, yc, w = r.get_final_coreset_details(X_train, y_train)
-                rmses.append(train_regressor(Xc, X_val, yc, y_val))
+                rmses.append(train_linear_regression(Xc, X_val, yc, y_val))
                 mmds.append(calculate_mmd2_exact(X_train, Xc, w, gamma))
             results['Reservoir_RMSE'].append(np.mean(rmses))
             results['Reservoir_MMD'].append(np.mean(mmds))

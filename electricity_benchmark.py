@@ -9,7 +9,7 @@ from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
 from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_adult_data, load_electricity_tiny
 from utils import calculate_mmd2_exact
-from downstream_tasks import train_classifier
+from downstream_tasks import train_logistic_regression
 
 def run_experiment(config):
     # Unpack config
@@ -42,7 +42,7 @@ def run_experiment(config):
     rbf = RBFSampler(gamma=gamma, n_components=n_rff, random_state=42)
     rbf.fit(X_train)
 
-    acc_whole = train_classifier(X_train, X_val, y_train, y_val)
+    acc_whole = train_logistic_regression(X_train, X_val, y_train, y_val)
     print(f"Baseline (whole dataset) accuracy: {acc_whole:.4f}")
 
     # initialize results structure
@@ -69,7 +69,7 @@ def run_experiment(config):
             idxs = streamer.print_coreset_provenance(batch_size)
             _, w = streamer.get_final_coreset()
             Xc, yc = X_train[idxs], y_train[idxs]
-            acc = train_classifier(Xc, X_val, yc, y_val)
+            acc = train_logistic_regression(Xc, X_val, yc, y_val)
             mmd = calculate_mmd2_exact(X_train, Xc, w, gamma)
             results['OnlineMMDPlus_Acc'].append(acc)
             results['OnlineMMDPlus_MMD'].append(mmd)
@@ -85,7 +85,7 @@ def run_experiment(config):
                     size = min(batch_size, n_total - start)
                     r.process_batch(start, size)
                 Xc, yc, w = r.get_final_coreset_details(X_train, y_train)
-                accs.append(train_classifier(Xc, X_val, yc, y_val))
+                accs.append(train_logistic_regression(Xc, X_val, yc, y_val))
                 mmds.append(calculate_mmd2_exact(X_train, Xc, w, gamma))
             results['Reservoir_Acc'].append(np.mean(accs))
             results['Reservoir_MMD'].append(np.mean(mmds))
@@ -101,7 +101,7 @@ def run_experiment(config):
                 if Xb.shape[0]:
                     ocs.process_batch(Xb, yb, idxb, X_train, y_train)
             Xc, yc, w = ocs.get_final_coreset_details(X_train, y_train)
-            acc = train_classifier(Xc, X_val, yc, y_val)
+            acc = train_logistic_regression(Xc, X_val, yc, y_val)
             mmd = calculate_mmd2_exact(X_train, Xc, w, gamma)
             results['OCS_Acc'].append(acc)
             results['OCS_MMD'].append(mmd)
@@ -123,7 +123,7 @@ def run_experiment(config):
             idxs, w = bcsr.get_final_coreset()
             if idxs.size:
                 Xc, yc = X_train[idxs], y_train[idxs]
-                acc = train_classifier(Xc, X_val, yc, y_val)
+                acc = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd = calculate_mmd2_exact(X_train, Xc, w, gamma)
             else:
                 acc, mmd = 0.0, float('inf')

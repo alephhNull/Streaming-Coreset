@@ -4,22 +4,9 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from typing import Tuple, List, Dict
-from abc import ABC, abstractmethod
+from streamers.abstract_streamer import AbstractStreamingCoreset
 
-class AbstractStreamingCoreset(ABC):
-    @abstractmethod
-    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
-        pass
-
-    @abstractmethod
-    def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
-        pass
-
-    @abstractmethod
-    def print_coreset_provenance(self) -> None:
-        pass
-
-class SummarizingModelGeneric(nn.Module):
+class SummarizingModel(nn.Module):
     def __init__(self, input_dim: int, num_classes: int, hidden_dim: int = 128):
         super().__init__()
         self.net = nn.Sequential(
@@ -35,7 +22,7 @@ class SummarizingModelGeneric(nn.Module):
         logits = self.classifier(h)
         return logits, h
 
-class SSDStreamerGeneric(AbstractStreamingCoreset):
+class SSDStreamer(AbstractStreamingCoreset):
     def __init__(
         self,
         buffer_capacity: int,
@@ -69,7 +56,7 @@ class SSDStreamerGeneric(AbstractStreamingCoreset):
         self.real_labels: List[int] = []
         self.real_provenance: List[Tuple[int,int]] = []
 
-        self.model = SummarizingModelGeneric(feature_dim, num_classes)
+        self.model = SummarizingModel(feature_dim, num_classes)
         self.optimizer = optim.SGD(self.model.parameters(), lr=summarizing_lr, momentum=0.9)
         self.loss_fn = nn.CrossEntropyLoss()
 

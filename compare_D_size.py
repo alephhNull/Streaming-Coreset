@@ -11,7 +11,7 @@ from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
 from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
 from dataloaders import load_adult_data, load_electricity_tiny
 from utils import calculate_mmd2_exact, calculate_mmd2_approx
-from downstream_tasks import train_classifier
+from downstream_tasks import train_logistic_regression
 
 def run_experiment(config):
     # Unpack config
@@ -44,7 +44,7 @@ def run_experiment(config):
     rbf = RBFSampler(gamma=gamma, n_components=n_rff, random_state=42)
     rbf.fit(X_train)
 
-    acc_whole = train_classifier(X_train, X_val, y_train, y_val)
+    acc_whole = train_logistic_regression(X_train, X_val, y_train, y_val)
     print(f"Baseline (whole dataset) accuracy: {acc_whole:.4f}")
 
     # initialize results structure

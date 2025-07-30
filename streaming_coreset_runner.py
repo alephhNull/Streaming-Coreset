@@ -13,11 +13,11 @@ from streamers.wcsl_streamer import WCSLStreamer
 from streamers.camel_streamer import CAMELStreamer
 from streamers.freesel_streamer import FreeSelStreamer
 from streamers.gss_streamer import GSSStreamer
-from streamers.ssd_streamer import SSDStreamerGeneric
+from streamers.ssd_streamer import SSDStreamer
 
 from dataloaders import load_dataset
 from utils import calculate_mmd2_exact, calculate_wass_distance
-from downstream_tasks import train_classifier
+from downstream_tasks import train_logistic_regression
 from streaming_utils import stream_simulator_gen
 import time
 import torch
@@ -197,7 +197,7 @@ def run_gss(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capa
 
 
 def run_ssd(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capacity, seed, arrival_interval_ms):
-    ssd_streamer = SSDStreamerGeneric(
+    ssd_streamer = SSDStreamer(
         buffer_capacity=buffer_capacity,
         target_coreset_size=coreset_size,
         num_classes=n_classes,
@@ -248,7 +248,7 @@ def run_single_experiment(config):
 
     train_loader, val_loader, X_train, X_val, y_train, y_val = load_dataset(dataset_name, ds_size, batch_size, seed, embedding, embed_dim, device)
 
-    acc_whole, auc_whole, f1_whole = train_classifier(X_train, X_val, y_train, y_val)
+    acc_whole, auc_whole, f1_whole = train_logistic_regression(X_train, X_val, y_train, y_val)
 
     experiment_result['whole_data'] = {
         'accuracy': acc_whole,
@@ -264,7 +264,7 @@ def run_single_experiment(config):
             for t in range(n_mmd_trials): 
                 Xc, yc, w, metrics = run_onlinemmdplus(train_loader, X_train, y_train, gamma, n_rff, seed+t, core_size,
                                               buffer_cap, online_epochs, lr_online, lambda_online, device, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
@@ -280,7 +280,7 @@ def run_single_experiment(config):
         if bm == 'Reservoir':
             for t in range(n_reservoir_trials):
                 Xc, yc, w, metrics = run_reservoir(train_loader, X_train, y_train, core_size, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
@@ -296,7 +296,7 @@ def run_single_experiment(config):
         if bm == 'CO2':
             for t in range(n_co2_trials):
                 Xc, yc, w, metrics = run_co2(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
@@ -312,7 +312,7 @@ def run_single_experiment(config):
         if bm == 'WCSL':
             for t in range(n_wcsl_trials):
                 Xc, yc, w, metrics = run_wcsl(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
@@ -328,7 +328,7 @@ def run_single_experiment(config):
         if bm == 'MMD_Critic':
             for t in range(n_mmd_critic_trials):
                 Xc, yc, w, metrics = run_mmd_critic(train_loader, X_train, y_train, core_size, buffer_cap, gamma, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
@@ -344,7 +344,7 @@ def run_single_experiment(config):
         if bm == 'CAMEL':
             for t in range(n_camel_trials):
                 Xc, yc, w, metrics = run_camel(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
@@ -360,7 +360,7 @@ def run_single_experiment(config):
         if bm == 'FreeSel':
             for t in range(n_freesel_trials):
                 Xc, yc, w, metrics = run_freesel(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
@@ -376,7 +376,7 @@ def run_single_experiment(config):
         if bm == 'GSS':
             for t in range(n_gss_trials):
                 Xc, yc, w, metrics = run_gss(train_loader, X_train, y_train, n_classes, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
@@ -392,7 +392,7 @@ def run_single_experiment(config):
         if bm == 'SSD':
             for t in range(n_ssd_trials):
                 Xc, yc, w, metrics = run_ssd(train_loader, X_train, y_train, n_classes, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_classifier(Xc, X_val, yc, y_val)
+                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
                 mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
                 W1_final = calculate_wass_distance(X_train, Xc, w)
                 experiment_result[bm].append({
