@@ -5,6 +5,20 @@ import torch.nn.functional as F
 from typing import Tuple, List
 from streamers.abstract_streamer import AbstractStreamingCoreset
 
+class SimpleNet(nn.Module):
+    """
+    Two-hidden-layer MLP with 100 units each, as per GSS paper for MNIST.
+    """
+    def __init__(self, input_dim: int, num_classes: int):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, 100)
+        self.fc2 = nn.Linear(100, 100)
+        self.fc3 = nn.Linear(100, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
 
 class SimpleNet(nn.Module):
     """
@@ -15,15 +29,15 @@ class SimpleNet(nn.Module):
         self.fc1 = nn.Linear(input_dim, 100)
         self.fc2 = nn.Linear(100, 100)
         self.fc3 = nn.Linear(100, num_classes)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         return self.fc3(x)
 
-
 class GSSStreamer(AbstractStreamingCoreset):
     """
-    Greedy variant of Gradient-based Sample Selection (GSS) for streaming coreset selection.
+    GSS variant with a maximally expensive buffer update process.
     """
     def __init__(self,
                  coreset_size: int,
@@ -40,116 +54,107 @@ class GSSStreamer(AbstractStreamingCoreset):
         self.model = SimpleNet(input_dim, num_classes).to(device)
         self.batch_size = batch_size
         self.device = device
-
-        # Initialize empty buffer of shape (0, D) after seeing first batch
+        
         self.buffer = None
-        self.labels = []             # true labels
-        self.provenance = []         # (batch_idx, local_idx)
-        self.scores = []             # c_i = max_cos_sim + 1
+        self.labels = []
+        self.provenance = []
+        self.scores = []
 
         if random_seed is not None:
             np.random.seed(random_seed)
             torch.manual_seed(random_seed)
 
-    def _get_gradients(self, X: np.ndarray, y: np.ndarray) -> torch.Tensor:
+    def _get_individual_gradient(self, X: np.ndarray, y: np.ndarray) -> torch.Tensor:
         """
-        Compute gradient feature vector for a mini-batch using true labels.
+        Compute gradient for a SINGLE sample.
         """
         self.model.zero_grad()
         inputs = torch.from_numpy(X).to(self.device).float()
         labels = torch.from_numpy(y).to(self.device).long()
+        
         outputs = self.model(inputs)
         loss = F.cross_entropy(outputs, labels)
         loss.backward()
-
+        
         grads = []
         for p in self.model.parameters():
             if p.grad is not None:
                 grads.append(p.grad.view(-1))
+        
         return torch.cat(grads)
 
     def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         B, D = X_batch_np.shape
-        # init buffer on first call
         if self.buffer is None:
             self.buffer = np.zeros((0, D), dtype=float)
 
-        # append new batch one sample at a time
+        # Process new samples one by one
         for i in range(B):
             x = X_batch_np[i:i+1]
             y = y_batch_np[i:i+1]
+            
+            # Gradient for the new sample (1 backprop)
+            g_new = self._get_individual_gradient(x, y)
 
-            # compute c_new: max_cos + 1
+            max_cos = -1.0
             if len(self.scores) > 0:
-                idxs = np.random.choice(len(self.scores),
-                                        min(self.n_samples_for_score, len(self.scores)),
-                                        replace=False)
-                X_buf = self.buffer[idxs]
-                y_buf = np.array(self.labels)[idxs]
-                g_buf = self._get_gradients(X_buf, y_buf)
-                g_new = self._get_gradients(x, y)
-
-                if g_buf.dim() == 1:
-                    g_buf = g_buf.unsqueeze(0)
-                cos = F.cosine_similarity(g_new.unsqueeze(0), g_buf)
-                max_cos = cos.max().item()
-            else:
-                max_cos = -1.0
-                g_new = self._get_gradients(x, y)
+                num_buffer_samples = len(self.labels)
+                n_samples = min(self.n_samples_for_score, num_buffer_samples)
+                idxs = np.random.choice(num_buffer_samples, n_samples, replace=False)
+                
+                # --- START OF MAXIMALLY EXPENSIVE OPERATION ---
+                # For each sampled buffer point, calculate its individual gradient.
+                # This involves n_samples_for_score separate backpropagations.
+                buffer_grads = []
+                for buf_idx in idxs:
+                    x_buf = self.buffer[buf_idx:buf_idx+1]
+                    y_buf = np.array([self.labels[buf_idx]])
+                    g_buf = self._get_individual_gradient(x_buf, y_buf)
+                    buffer_grads.append(g_buf)
+                
+                if buffer_grads:
+                    g_buf_stack = torch.stack(buffer_grads)
+                    cos_similarities = F.cosine_similarity(g_new.unsqueeze(0), g_buf_stack)
+                    max_cos = cos_similarities.max().item()
+                # --- END OF MAXIMALLY EXPENSIVE OPERATION ---
 
             c_new = max_cos + 1.0
 
             if len(self.scores) < self.buffer_capacity:
-                # fill buffer
                 self.buffer = np.vstack([self.buffer, x])
                 self.labels.append(int(y[0]))
                 self.provenance.append((batch_idx, i))
                 self.scores.append(c_new)
             else:
-                # consider replacement only if c_new < 1 (max_cos < 0)
-                if c_new < 1.0:
-                    scores_arr = np.array(self.scores)
-                    probs = scores_arr / scores_arr.sum()
-                    cand = np.random.choice(len(self.scores), p=probs)
-
-                    c_i = self.scores[cand]
-                    if np.random.rand() < c_i / (c_i + c_new):
-                        self.buffer[cand] = x
-                        self.labels[cand] = int(y[0])
-                        self.provenance[cand] = (batch_idx, i)
-                        self.scores[cand] = c_new
+                scores_arr = np.array(self.scores)
+                probs = scores_arr / scores_arr.sum()
+                cand_idx = np.random.choice(len(self.scores), p=probs)
+                c_i = self.scores[cand_idx]
+                
+                if np.random.rand() < c_i / (c_i + c_new):
+                    self.buffer[cand_idx] = x
+                    self.labels[cand_idx] = int(y[0])
+                    self.provenance[cand_idx] = (batch_idx, i)
+                    self.scores[cand_idx] = c_new
 
     def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
-        N = self.buffer.shape[0]
-        if N > self.coreset_size:
-            idx = np.random.choice(N, self.coreset_size, replace=False)
+        num_buffer_samples = self.buffer.shape[0]
+        if num_buffer_samples > self.coreset_size:
+            indices = np.random.choice(num_buffer_samples, self.coreset_size, replace=False)
         else:
-            idx = np.arange(N)
+            indices = np.arange(num_buffer_samples)
 
-        final_buf = self.buffer[idx]
-        final_prov = [self.provenance[i] for i in idx]
-        weights = np.ones(len(idx)) / len(idx)
-        flat = np.array([b * self.batch_size + j for b, j in final_prov])
-        return flat, weights, final_prov
-
+        final_buffer = self.buffer[indices]
+        final_provenance = [self.provenance[i] for i in indices]
+        weights = np.ones(len(indices)) / len(indices)
+        flat_indices = np.array([b * self.batch_size + j for b, j in final_provenance])
+        
+        return flat_indices, weights, final_provenance
+    
+    
     def print_coreset_provenance(self) -> None:
-        flat, w, prov = self.get_final_coreset()
+        """Prints the provenance of the final coreset samples."""
+        flat_indices, weights, provenance_list = self.get_final_coreset()
         print("Coreset Provenance:")
-        for i, (b, j) in enumerate(prov):
-            print(f"- Point {i}: GlobalIdx={flat[i]}, Batch={b}, LocalIdx={j}, Weight={w[i]:.4f}")
-
-class SimpleNet(nn.Module):
-    """
-    Two-hidden-layer MLP with 100 units each, as per GSS paper for MNIST.
-    """
-    def __init__(self, input_dim: int, num_classes: int):
-        super().__init__()
-        self.fc1 = nn.Linear(input_dim, 100)
-        self.fc2 = nn.Linear(100, 100)
-        self.fc3 = nn.Linear(100, num_classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
-
+        for i, (batch_idx, local_idx) in enumerate(provenance_list):
+            print(f"- Point {i}: GlobalIdx={flat_indices[i]}, Batch={batch_idx}, LocalIdx={local_idx}, Weight={weights[i]:.4f}")
