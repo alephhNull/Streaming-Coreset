@@ -1,8 +1,22 @@
 from tabulate import tabulate
 import numpy as np
+import math
 
-def print_experiment_summary(config: dict, result: dict, config_keys=None):
-    # === Print Important Configs ===
+
+# Helper to round or stringify
+def _fmt(x, digits=4):
+    if isinstance(x, (int, np.integer)):
+        return int(x)
+    if isinstance(x, (float, np.floating)):
+        return 'nan' if math.isnan(x) else round(x, digits)
+    return str(x)
+
+
+def print_experiment_summary(config: dict,
+                             result: dict,
+                             config_keys=None):
+    
+
     if config_keys is None:
         config_keys = [
             "dataset", "embedding", "embed_dim", "coreset_size", "dataset_subset_size",
@@ -13,52 +27,60 @@ def print_experiment_summary(config: dict, result: dict, config_keys=None):
     config_table = [[k, config[k]] for k in config_keys if k in config]
     print("\n=== Experiment Configuration ===")
     print(tabulate(config_table, headers=["Parameter", "Value"], tablefmt="grid"))
+    
+    tasks      = config['tasks']
+    down_ms    = config.get('metrics', [])             # e.g. ['f1']
+    stream_ms  = config.get('streaming_metrics', [])   # e.g. ['avg_batch_time_ms']
+    dist_ms    = config.get('dist_metrics', [])        # e.g. ['MMD']
 
-    # === Print Unified Summary Table (Accuracy, AUC, F1, MMD, Streaming Metrics) ===
-    summary_table = []
+    # Build headers:
+    headers = ["Benchmark"]
+    # downstream metrics per task
+    for task in tasks:
+        for m in down_ms:
+            headers.append(f"{task}:{m}")
+    # dist metrics (global)
+    for dm in dist_ms:
+        headers.append(dm)
+    # streaming metrics (global)
+    for sm in stream_ms:
+        headers.append(sm)
 
-    for bm, results in result.items():
-        if bm == 'whole_data':
-            summary_table.append([
-                bm,
-                round(results['accuracy'], 4),
-                round(results['auc'], 4) if not np.isnan(results['auc']) else 'nan',
-                round(results['f1'], 4),
-                '-', '-', '-', '-', '-', '-'
-            ])
-        else:
-            accs = [r['accuracy'] for r in results]
-            aucs = [r['auc'] for r in results if not np.isnan(r['auc'])]
-            f1s = [r['f1'] for r in results]
-            mmds = [r['mmd'] for r in results]
-            wds = [r['W1'] for r in results]
+    rows = []
+    # 1) whole_data baseline
+    row = ["whole_data"]
+    for task in tasks:
+        wd = result['whole_data'][task]
+        for m in down_ms:
+            row.append(_fmt(wd.get(m, '')))
+    # baseline has no dist or streaming
+    row += ['-' for _ in (dist_ms + stream_ms)]
+    rows.append(row)
 
-            # Get streaming metric keys from the first trial
-            metric_keys = results[0]['streaming_metrics'].keys()
+    # 2) each streaming benchmark
+    for bm in config['benchmarks']:
+        row = [bm]
+        # downstream per task
+        for task in tasks:
+            entries = result[bm][task]
+            for m in down_ms:
+                vals = [e.get(m, np.nan) for e in entries]
+                mean = np.nanmean(vals) if vals else np.nan
+                row.append(_fmt(mean))
+        # dist metrics (pick from any task; they're identical across tasks)
+        # we use the first task
+        first_entries = result[bm][tasks[0]]
+        for dm in dist_ms:
+            vals = [e.get('dist', {}).get(dm, np.nan) for e in first_entries]
+            mean = np.nanmean(vals) if vals else np.nan
+            row.append(_fmt(mean, digits=6))
+        # streaming metrics (global)
+        sm_list = result[bm]['streaming_metrics']
+        for sm in stream_ms:
+            vals = [s.get(sm, np.nan) for s in sm_list]
+            mean = np.nanmean(vals) if vals else np.nan
+            row.append(_fmt(mean))
+        rows.append(row)
 
-            avg_metrics = {
-                key: np.mean([r['streaming_metrics'][key] for r in results])
-                for key in metric_keys
-            }
-
-            summary_table.append([
-                bm,
-                round(np.mean(accs), 4),
-                round(np.mean(aucs), 4) if aucs else 'nan',
-                round(np.mean(f1s), 4),
-                round(np.mean(mmds), 6),
-                round(np.mean(wds), 6),
-                round(avg_metrics.get('avg_batch_time_ms', 0.0), 2),
-                round(avg_metrics.get('effective_throughput_pps', 0.0), 2),
-                round(avg_metrics.get('velocity_data_loss_pct', 0.0), 2),
-                int(avg_metrics.get('batches_processed', 0)),
-                int(avg_metrics.get('batches_dropped', 0))
-            ])
-
-    headers = [
-        "Benchmark", "Accuracy", "AUC", "F1", "MMD", "1-Wasser",
-        "Avg Time (ms)", "Throughput (pps)", "Loss (%)", "Processed", "Dropped"
-    ]
-
-    print("\n=== Mean Results per Benchmark (including streaming metrics) ===")
-    print(tabulate(summary_table, headers=headers, tablefmt="grid"))
+    print("\n=== Experiment Summary ===")
+    print(tabulate(rows, headers=headers, tablefmt="github"))

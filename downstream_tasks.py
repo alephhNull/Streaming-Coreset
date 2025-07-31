@@ -21,8 +21,8 @@ def train_logistic_regression(
     X_val: np.ndarray,
     y_train: np.ndarray,
     y_val: np.ndarray,
-    weights: np.ndarray = None  # Optional sample weights
-) -> float:
+    weights: np.ndarray = None
+) -> dict:
     unique_classes = np.unique(y_train)
 
     if len(unique_classes) < 2:
@@ -30,8 +30,8 @@ def train_logistic_regression(
         y_pred = np.full_like(y_val, fill_value=unique_classes[0])
         acc = accuracy_score(y_val, y_pred)
         f1 = float('nan')
-        auc = float('nan')  # AUC is undefined with one class
-        return acc, auc, f1
+        auc = float('nan')
+        return {"acc": acc, "auc": auc, "f1": f1}
 
     clf = LogisticRegression(max_iter=1000, random_state=42)
 
@@ -48,7 +48,7 @@ def train_logistic_regression(
     f1 = f1_score(y_val, y_pred, average='binary' if clf.classes_.shape[0] == 2 else 'macro', zero_division=0)
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
 
-    return acc, auc, f1
+    return {"acc": acc, "auc": auc, "f1": f1}
 
 def train_nn_classifier(
     train_loader: DataLoader,
@@ -59,12 +59,7 @@ def train_nn_classifier(
     weights: torch.Tensor = None,
     epochs: int = 20,
     lr: float = 0.001
-) -> Tuple[float, float, float]:
-    """
-    Trains a neural network classifier and returns (acc, auc, f1) on validation set.
-    Assumes inputs from train_loader are in (features, labels) format.
-    """
-
+) -> dict:
     class SimpleNN(nn.Module):
         def __init__(self, input_dim: int, num_classes: int):
             super(SimpleNN, self).__init__()
@@ -108,7 +103,6 @@ def train_nn_classifier(
             loss.backward()
             optimizer.step()
 
-    # Evaluation
     model.eval()
     y_true, y_pred, y_score = [], [], []
     with torch.no_grad():
@@ -126,7 +120,7 @@ def train_nn_classifier(
     f1 = f1_score(y_true, y_pred, average='binary' if num_classes == 2 else 'macro', zero_division=0)
     auc = roc_auc_score(y_true, y_score) if num_classes == 2 else float('nan')
 
-    return acc, auc, f1
+    return {"acc": acc, "auc": auc, "f1": f1}
 
 def train_nn_regression(
     X_train: np.ndarray,
@@ -138,12 +132,7 @@ def train_nn_regression(
     epochs: int = 100,
     lr: float = 0.001,
     device: torch.device = torch.device("cpu")
-) -> Tuple[float, float, float]:
-    """
-    Neural network regression with optional sample weights.
-    Returns (rmse, r2, mae)
-    """
-
+) -> dict:
     class SimpleRegressor(nn.Module):
         def __init__(self, input_dim):
             super().__init__()
@@ -191,24 +180,22 @@ def train_nn_regression(
     rmse = np.sqrt(mean_squared_error(y_val, y_pred))
     r2 = r2_score(y_val, y_pred)
     mae = np.mean(np.abs(y_val - y_pred))
-    return rmse, r2, mae
+    return {"rmse": rmse, "r2": r2, "mae": mae}
 
-
-def train_linear_regression(X_train, X_val, y_train, y_val, weights=None):
+def train_linear_regression(X_train, X_val, y_train, y_val, weights=None) -> dict:
     reg = LinearRegression()
     reg.fit(X_train, y_train, sample_weight=weights)
     y_pred = reg.predict(X_val)
     rmse = np.sqrt(mean_squared_error(y_val, y_pred))
     r2 = r2_score(y_val, y_pred)
     mae = np.mean(np.abs(y_val - y_pred))
-    return rmse, r2, mae
+    return {"rmse": rmse, "r2": r2, "mae": mae}
 
-
-def train_svm_classifier(X_train, X_val, y_train, y_val, weights=None):
+def train_svm_classifier(X_train, X_val, y_train, y_val, weights=None) -> dict:
     unique_classes = np.unique(y_train)
     if len(unique_classes) < 2:
         y_pred = np.full_like(y_val, fill_value=unique_classes[0])
-        return accuracy_score(y_val, y_pred), float('nan'), float('nan')
+        return {"acc": accuracy_score(y_val, y_pred), "auc": float('nan'), "f1": float('nan')}
     
     clf = SVC(probability=True, class_weight='balanced' if weights is not None else None)
     clf.fit(X_train, y_train, sample_weight=weights)
@@ -218,9 +205,9 @@ def train_svm_classifier(X_train, X_val, y_train, y_val, weights=None):
     acc = accuracy_score(y_val, y_pred)
     f1 = f1_score(y_val, y_pred, average='binary' if len(unique_classes) == 2 else 'macro')
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
-    return acc, auc, f1
+    return {"acc": acc, "auc": auc, "f1": f1}
 
-def train_random_forest_classifier(X_train, X_val, y_train, y_val, weights=None):
+def train_random_forest_classifier(X_train, X_val, y_train, y_val, weights=None) -> dict:
     clf = RandomForestClassifier(random_state=42)
     clf.fit(X_train, y_train, sample_weight=weights)
     y_pred = clf.predict(X_val)
@@ -229,10 +216,9 @@ def train_random_forest_classifier(X_train, X_val, y_train, y_val, weights=None)
     acc = accuracy_score(y_val, y_pred)
     f1 = f1_score(y_val, y_pred, average='binary' if clf.n_classes_ == 2 else 'macro')
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
-    return acc, auc, f1
+    return {"acc": acc, "auc": auc, "f1": f1}
 
-
-def train_xgboost_classifier(X_train, X_val, y_train, y_val, weights=None):
+def train_xgboost_classifier(X_train, X_val, y_train, y_val, weights=None) -> dict:
     clf = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
     clf.fit(X_train, y_train, sample_weight=weights)
     y_pred = clf.predict(X_val)
@@ -241,8 +227,7 @@ def train_xgboost_classifier(X_train, X_val, y_train, y_val, weights=None):
     acc = accuracy_score(y_val, y_pred)
     f1 = f1_score(y_val, y_pred, average='binary' if clf.n_classes_ == 2 else 'macro')
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
-    return acc, auc, f1
-
+    return {"acc": acc, "auc": auc, "f1": f1}
 
 def train_naive_bayes_classifier(
     X_train: np.ndarray,
@@ -250,14 +235,14 @@ def train_naive_bayes_classifier(
     y_train: np.ndarray,
     y_val: np.ndarray,
     weights: np.ndarray = None
-) -> tuple:
+) -> dict:
     unique_classes = np.unique(y_train)
     if len(unique_classes) < 2:
         y_pred = np.full_like(y_val, fill_value=unique_classes[0])
-        return accuracy_score(y_val, y_pred), float('nan'), float('nan')
+        return {"acc": accuracy_score(y_val, y_pred), "auc": float('nan'), "f1": float('nan')}
 
     clf = GaussianNB()
-    clf.fit(X_train, y_train)  # does not support sample_weight
+    clf.fit(X_train, y_train)
 
     y_pred = clf.predict(X_val)
     y_proba = clf.predict_proba(X_val)[:, 1] if len(clf.classes_) == 2 else None
@@ -266,8 +251,7 @@ def train_naive_bayes_classifier(
     f1 = f1_score(y_val, y_pred, average='binary' if len(clf.classes_) == 2 else 'macro', zero_division=0)
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
 
-    return acc, auc, f1
-
+    return {"acc": acc, "auc": auc, "f1": f1}
 
 def train_knn_classifier(
     X_train: np.ndarray,
@@ -276,14 +260,14 @@ def train_knn_classifier(
     y_val: np.ndarray,
     weights: np.ndarray = None,
     n_neighbors: int = 5
-) -> tuple:
+) -> dict:
     unique_classes = np.unique(y_train)
     if len(unique_classes) < 2:
         y_pred = np.full_like(y_val, fill_value=unique_classes[0])
-        return accuracy_score(y_val, y_pred), float('nan'), float('nan')
+        return {"acc": accuracy_score(y_val, y_pred), "auc": float('nan'), "f1": float('nan')}
 
     clf = KNeighborsClassifier(n_neighbors=n_neighbors)
-    clf.fit(X_train, y_train)  # weights not supported
+    clf.fit(X_train, y_train)
 
     y_pred = clf.predict(X_val)
     y_proba = clf.predict_proba(X_val)[:, 1] if len(clf.classes_) == 2 else None
@@ -292,36 +276,33 @@ def train_knn_classifier(
     f1 = f1_score(y_val, y_pred, average='binary' if len(clf.classes_) == 2 else 'macro', zero_division=0)
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
 
-    return acc, auc, f1
+    return {"acc": acc, "auc": auc, "f1": f1}
 
-
-def train_random_forest_regression(X_train, X_val, y_train, y_val, weights=None):
+def train_random_forest_regression(X_train, X_val, y_train, y_val, weights=None) -> dict:
     reg = RandomForestRegressor(random_state=42)
     reg.fit(X_train, y_train, sample_weight=weights)
     y_pred = reg.predict(X_val)
     rmse = np.sqrt(mean_squared_error(y_val, y_pred))
     r2 = r2_score(y_val, y_pred)
     mae = np.mean(np.abs(y_val - y_pred))
-    return rmse, r2, mae
+    return {"rmse": rmse, "r2": r2, "mae": mae}
 
-def train_xgboost_regression(X_train, X_val, y_train, y_val, weights=None):
+def train_xgboost_regression(X_train, X_val, y_train, y_val, weights=None) -> dict:
     reg = XGBRegressor()
     reg.fit(X_train, y_train, sample_weight=weights)
     y_pred = reg.predict(X_val)
     rmse = np.sqrt(mean_squared_error(y_val, y_pred))
     r2 = r2_score(y_val, y_pred)
     mae = np.mean(np.abs(y_val - y_pred))
-    return rmse, r2, mae
+    return {"rmse": rmse, "r2": r2, "mae": mae}
 
-
-def evaluate_clustering(y_true, y_pred):
+def evaluate_clustering(y_true, y_pred) -> dict:
     ari = adjusted_rand_score(y_true, y_pred)
     nmi = normalized_mutual_info_score(y_true, y_pred)
     ami = adjusted_mutual_info_score(y_true, y_pred)
-    return ari, nmi, ami
+    return {"ari": ari, "nmi": nmi, "ami": ami}
 
-
-def train_kmeans_clustering(X_train: np.ndarray, y_train: np.ndarray, n_clusters: int = None):
+def train_kmeans_clustering(X_train: np.ndarray, y_train: np.ndarray, n_clusters: int = None) -> dict:
     if n_clusters is None:
         n_clusters = len(np.unique(y_train))
 
@@ -329,14 +310,12 @@ def train_kmeans_clustering(X_train: np.ndarray, y_train: np.ndarray, n_clusters
     y_pred = model.fit_predict(X_train)
     return evaluate_clustering(y_train, y_pred)
 
-
-def train_dbscan_clustering(X_train: np.ndarray, y_train: np.ndarray, eps: float = 0.5, min_samples: int = 5):
+def train_dbscan_clustering(X_train: np.ndarray, y_train: np.ndarray, eps: float = 0.5, min_samples: int = 5) -> dict:
     model = DBSCAN(eps=eps, min_samples=min_samples)
     y_pred = model.fit_predict(X_train)
     return evaluate_clustering(y_train, y_pred)
 
-
-def train_agglomerative_clustering(X_train: np.ndarray, y_train: np.ndarray, n_clusters: int = None):
+def train_agglomerative_clustering(X_train: np.ndarray, y_train: np.ndarray, n_clusters: int = None) -> dict:
     if n_clusters is None:
         n_clusters = len(np.unique(y_train))
 

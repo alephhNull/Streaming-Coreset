@@ -17,7 +17,7 @@ from streamers.ssd_streamer import SSDStreamer
 
 from dataloaders import load_dataset
 from utils import calculate_mmd2_exact, calculate_wass_distance
-from downstream_tasks import train_logistic_regression
+from downstream_tasks import *
 from streaming_utils import stream_simulator_gen
 import time
 import torch
@@ -211,198 +211,142 @@ def run_ssd(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capa
     return Xc, yc, w, metrics
 
 def run_single_experiment(config):
-    dataset_name = config['dataset']
-    ds_size = config['dataset_subset_size']
-    seed = config['random_seed']
-    embedding = config['embedding']
-    embed_dim = config['embed_dim']
-    batch_size = config['batch_size']
-    n_classes = config.get('n_classes', 2)
-
-    n_rff = config['n_rff_components']
-    gamma = config['kernel_gamma']
-    buffer_cap = config['buffer_capacity']
-    online_epochs = config['n_epochs_online']
-    lr_online = config['lr_online']
-    lambda_online = config['lambda_log_online']
-
-    benchmarks = config['benchmarks']
-    core_size = config['coreset_size']
-    arrival_interval_ms = config.get('arrival_interval', None)
-
-    n_mmd_trials = config.get('mmd_trials', 1)
-    n_co2_trials = config.get('co2_trials', 1)
-    n_wcsl_trials = config.get('wcsl_trials', 1)
-    n_mmd_critic_trials = config.get('mmd_critic_trials', 1)
-    n_camel_trials = config.get('camel_trials', 1)
-    n_freesel_trials = config.get('freesel_trials', 1)
-    n_gss_trials = config.get('gss_trials', 1)
-    n_ssd_trials = config.get('ssd_trials', 1)
-    n_reservoir_trials = config.get('reservoir_trials', 10)
-
-
+    # Unpack config and parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    experiment_result = {bm: {} for bm in benchmarks}
+    # Load data
+    train_loader, val_loader, X_train, X_val, y_train, y_val = load_dataset(
+        config['dataset'], config['dataset_subset_size'], config['batch_size'],
+        config['random_seed'], config['embedding'], config['embed_dim'], device
+    )
 
-    train_loader, val_loader, X_train, X_val, y_train, y_val = load_dataset(dataset_name, ds_size, batch_size, seed, embedding, embed_dim, device)
+    # Downstream tasks and metrics
+    tasks = config['tasks']            # e.g. ['logistic_regression', 'SVM', 'KNN']
+    metrics = config['metrics']        # e.g. ['accuracy', 'f1', 'auc']
+    dist_metrics = config.get('dist_metrics', [])
 
-    acc_whole, auc_whole, f1_whole = train_logistic_regression(X_train, X_val, y_train, y_val)
+    # Trials per benchmark
+    benchmarks = config['benchmarks']
+    trials = {bm: config.get(f"{bm.lower()}_trials", 1) for bm in benchmarks}
 
-    experiment_result['whole_data'] = {
-        'accuracy': acc_whole,
-        'auc': auc_whole,
-        'f1': f1_whole
+    # Prepare experiment_result
+    experiment_result = {}
+    # Baseline on whole data
+
+    task_funcs = {
+        'logistic_regression': train_logistic_regression,
+        'SVM': train_svm_classifier,
+        'KNN': train_knn_classifier,
+        'NaiveBayes': train_naive_bayes_classifier,
+        'RandomForest': train_random_forest_classifier,
+        'XGBoost': train_xgboost_classifier,
+        'linear_regression': train_linear_regression,
+        'RF_regression': train_random_forest_regression,
+        'XGB_regression': train_xgboost_regression,
+        'KMeans': lambda Xtr, Xv, ytr, yv, w=None: train_kmeans_clustering(Xtr, ytr),
+        'DBSCAN': lambda Xtr, Xv, ytr, yv, w=None: train_dbscan_clustering(Xtr, ytr),
+        'Agglomerative': lambda Xtr, Xv, ytr, yv, w=None: train_agglomerative_clustering(Xtr, ytr),
+    }
+    # Map dist metric names to functions
+    dist_funcs = {
+        'MMD': calculate_mmd2_exact,
+        '1-Wasserstein': calculate_wass_distance,
     }
 
-    print(f"\n== Coreset size: {core_size}")
+    experiment_result['whole_data'] = {}
+    for task in tasks:
+        func = task_funcs[task]
+        res = func(X_train, X_val, y_train, y_val)
+        experiment_result['whole_data'][task] = res
 
+    # Streaming benchmarks
     for bm in benchmarks:
-        experiment_result[bm] = []
-        if bm =='OnlineMMDPlus':
-            for t in range(n_mmd_trials): 
-                Xc, yc, w, metrics = run_onlinemmdplus(train_loader, X_train, y_train, gamma, n_rff, seed+t, core_size,
-                                              buffer_cap, online_epochs, lr_online, lambda_online, device, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
+        experiment_result[bm] = {task: [] for task in tasks}
+        experiment_result[bm]['streaming_metrics'] = []
 
-        if bm == 'Reservoir':
-            for t in range(n_reservoir_trials):
-                Xc, yc, w, metrics = run_reservoir(train_loader, X_train, y_train, core_size, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
-            
-        if bm == 'CO2':
-            for t in range(n_co2_trials):
-                Xc, yc, w, metrics = run_co2(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
+        for t in range(trials[bm]):
+            # Choose the coreset method
+            if bm == 'OnlineMMDPlus':
+                Xc, yc, w, stream_meta = run_onlinemmdplus(
+                    train_loader, X_train, y_train,
+                    config['kernel_gamma'], config['n_rff_components'],
+                    config['random_seed'] + t, config['coreset_size'],
+                    config['buffer_capacity'], config['n_epochs_online'],
+                    config['lr_online'], config['lambda_log_online'],
+                    device, config.get('arrival_interval')
+                )
+            elif bm == 'Reservoir':
+                Xc, yc, w, stream_meta = run_reservoir(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['random_seed'] + t,
+                    config.get('arrival_interval')
+                )
+            elif bm == 'CO2':
+                Xc, yc, w, stream_meta = run_co2(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'WCSL':
+                Xc, yc, w, stream_meta = run_wcsl(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'MMD_Critic':
+                Xc, yc, w, stream_meta = run_mmd_critic(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['kernel_gamma'], config['random_seed'] + t,
+                    config.get('arrival_interval')
+                )
+            elif bm == 'CAMEL':
+                Xc, yc, w, stream_meta = run_camel(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'FreeSel':
+                Xc, yc, w, stream_meta = run_freesel(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'GSS':
+                Xc, yc, w, stream_meta = run_gss(
+                    train_loader, X_train, y_train,
+                    config.get('n_classes', 2), config['coreset_size'],
+                    config['buffer_capacity'], config['random_seed'] + t,
+                    config.get('arrival_interval')
+                )
+            elif bm == 'SSD':
+                Xc, yc, w, stream_meta = run_ssd(
+                    train_loader, X_train, y_train,
+                    config.get('n_classes', 2), config['coreset_size'],
+                    config['buffer_capacity'], config['random_seed'] + t,
+                    config.get('arrival_interval')
+                )
+            else:
+                raise ValueError(f"Unknown benchmark: {bm}")
 
-        if bm == 'WCSL':
-            for t in range(n_wcsl_trials):
-                Xc, yc, w, metrics = run_wcsl(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
+            # Compute distribution metrics
+            dist_vals = {}
+            for dm in dist_metrics:
+                if dm == 'MMD':
+                    dist_vals['MMD'] = calculate_mmd2_exact(X_train, Xc, w, config['kernel_gamma'])
+                elif dm == '1-Wasserstein':
+                    dist_vals['1-Wasserstein'] = calculate_wass_distance(X_train, Xc, w)
 
-        if bm == 'MMD_Critic':
-            for t in range(n_mmd_critic_trials):
-                Xc, yc, w, metrics = run_mmd_critic(train_loader, X_train, y_train, core_size, buffer_cap, gamma, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
 
-        if bm == 'CAMEL':
-            for t in range(n_camel_trials):
-                Xc, yc, w, metrics = run_camel(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
+            # Evaluate downstream tasks
+            for task in tasks:
+                res = task_funcs[task](Xc, X_val, yc, y_val, w)
+                entry = {'trial': t, **res}
+                if dist_vals:
+                    entry['dist'] = dist_vals
+                experiment_result[bm][task].append(entry)
 
-        if bm == 'FreeSel':
-            for t in range(n_freesel_trials):
-                Xc, yc, w, metrics = run_freesel(train_loader, X_train, y_train, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
-            
-        if bm == 'GSS':
-            for t in range(n_gss_trials):
-                Xc, yc, w, metrics = run_gss(train_loader, X_train, y_train, n_classes, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
-
-        if bm == 'SSD':
-            for t in range(n_ssd_trials):
-                Xc, yc, w, metrics = run_ssd(train_loader, X_train, y_train, n_classes, core_size, buffer_cap, seed+t, arrival_interval_ms)
-                acc_final, auc_final, f1_final = train_logistic_regression(Xc, X_val, yc, y_val)
-                mmd_final = calculate_mmd2_exact(X_train, Xc, w, gamma)
-                W1_final = calculate_wass_distance(X_train, Xc, w)
-                experiment_result[bm].append({
-                    'trial': t,
-                    'accuracy': acc_final,
-                    'auc': auc_final,
-                    'f1': f1_final,
-                    'mmd': mmd_final,
-                    'W1': W1_final,
-                    'streaming_metrics': metrics
-                })
+            experiment_result[bm]['streaming_metrics'].append(stream_meta)
 
     return experiment_result
