@@ -15,14 +15,14 @@ if __name__ == "__main__":
     "dataset": "mnist",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["OnlineMMDPlus", "WKH", "Reservoir"],  # only these
+    "benchmarks": ["SuperSampling", "OnlineMMDPlus",  "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
     "n_rff_components": 1000,
     "kernel_gamma": 0.001,
     "buffer_capacity": 150,
-    "random_seed": 29222,
+    "random_seed": 1421380,
     "n_epochs_online": 20,
     "lr_online": 0.1,
     "lambda_log_online": 1e-7,
@@ -33,7 +33,8 @@ if __name__ == "__main__":
     "metrics": ['acc', 'f1'],
     "streaming_metrics": ['avg_batch_time_ms'],
     "wkh_trials": 10,
-    "onlinemmdplus_trials": 10
+    "onlinemmdplus_trials": 1,
+    "supersampling_trials": 10
 }
 
 

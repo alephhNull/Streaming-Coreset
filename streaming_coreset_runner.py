@@ -9,6 +9,7 @@ from streamers.ocsstreamer import OCSStreamer
 from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
 from streamers.co2_streamer import CO2Streamer
 from streamers.mmdplusstreamer import OnlineMMDPlusStreamer
+from streamers.supersampling_streamer import SupersamplingCoreset
 from streamers.wcsl_streamer import WCSLStreamer
 from streamers.camel_streamer import CAMELStreamer
 from streamers.freesel_streamer import FreeSelStreamer
@@ -213,6 +214,22 @@ def run_wkh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff
 
     return Xc, yc, w, metrics
 
+def run_super_sampling(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff, seed, arrival_interval_ms):
+    super_sampling_streamer = SupersamplingCoreset(
+        target_coreset_size=coreset_size,
+        buffer_size=buffer_capacity,
+        batch_size=train_loader.batch_size,
+        input_dim=X_train.shape[1],
+        num_features=n_rff,
+        gamma=1.0,
+        seed=seed
+    )
+
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(super_sampling_streamer, train_loader, X_train, y_train, arrival_interval_ms)
+
+    return Xc, yc, w, metrics
+
 def run_ssd(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capacity, seed, arrival_interval_ms):
     ssd_streamer = SSDStreamer(
         buffer_capacity=buffer_capacity,
@@ -350,6 +367,13 @@ def run_single_experiment(config):
                     config['coreset_size'], config['buffer_capacity'],
                     config['n_rff_components'], config['kernel_gamma'],
                     config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'SuperSampling':
+                Xc, yc, w, stream_meta = run_super_sampling(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['n_rff_components'], config['random_seed'] + t,
+                    config.get('arrival_interval')
                 )
             else:
                 raise ValueError(f"Unknown benchmark: {bm}")

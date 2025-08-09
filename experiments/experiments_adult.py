@@ -13,7 +13,7 @@ if __name__ == "__main__":
     "dataset": "adult",
     "embedding": None,
     "embed_dim": None,
-    "benchmarks": ["WKH", "OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["SuperSampling", "OnlineMMDPlus", "Reservoir"],  # only these
     "coreset_size": 30,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -31,7 +31,8 @@ if __name__ == "__main__":
     "metrics": ['acc', 'f1', 'auc'],
     "streaming_metrics": ['avg_batch_time_ms'],
     "wkh_trials": 10,
-    "onlinemmdplus_trials": 10
+    "onlinemmdplus_trials": 10,
+    "supersampling_trials": 10
 }
 
 

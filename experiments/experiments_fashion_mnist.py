@@ -14,7 +14,7 @@ if __name__ == "__main__":
     "dataset": "fashion_mnist",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["WKH", "OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["SuperSampling", "OnlineMMDPlus", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -32,7 +32,8 @@ if __name__ == "__main__":
     "metrics": ['acc', 'f1'],
     "streaming_metrics": ['avg_batch_time_ms'],
     "wkh_trials": 10,
-    "onlinemmdplus_trials": 10
+    "onlinemmdplus_trials": 10,
+    "supersampling_trials": 10
 }
 
 
