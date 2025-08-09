@@ -14,7 +14,7 @@ if __name__ == "__main__":
     "dataset": "kdd99",
     "embedding": None,
     "embed_dim": None,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["WKH", "OnlineMMDPlus", "Reservoir"],  # only these
     "coreset_size": 20,
     "dataset_subset_size": 10000,
     "batch_size": 50,
@@ -26,7 +26,13 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 5e-5,
     "reservoir_trials": 10,
-    "n_classes": 2
+    "n_classes": 2,
+    "tasks": ['logistic_regression'],
+    "dist_metrics": ['MMD', '1-Wasserstein'],
+    "metrics": ['acc', 'f1', 'auc'],
+    "streaming_metrics": ['avg_batch_time_ms'],
+    "wkh_trials": 5,
+    "onlinemmdplus_trials": 5
 }
 
 

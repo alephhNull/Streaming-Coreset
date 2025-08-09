@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torchvision
 from torchvision import datasets, transforms
+from torchvision.transforms import InterpolationMode
 from torch.utils.data import DataLoader, Subset, ConcatDataset, random_split, TensorDataset, Dataset
 import os
 from torchvision.models import resnet18, ResNet18_Weights
@@ -494,7 +495,7 @@ def load_cifar10(subset_size, seed, embedding, embed_dim, device, cache_dir="fea
         print("Extracting features for full CIFAR using pre-trained ResNet18...")
         full_ds = load_full_cifar()
         resnet_transform = transforms.Compose([
-            transforms.Resize(224),
+            transforms.Resize(224, InterpolationMode.BICUBIC),
             transforms.ToTensor(),
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ])

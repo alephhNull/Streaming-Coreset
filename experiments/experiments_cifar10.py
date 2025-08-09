@@ -13,8 +13,8 @@ if __name__ == "__main__":
     config = {
     "dataset": "cifar10",
     "embedding": 'resnet18',
-    "embed_dim": 50,
-    "benchmarks": ["GSS", "OnlineMMDPlus", "Reservoir"],  # only these
+    "embed_dim": 100,
+    "benchmarks": ["WKH", "OnlineMMDPlus", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -26,7 +26,13 @@ if __name__ == "__main__":
     "lr_online": 0.1,
     "lambda_log_online": 1e-7,
     "reservoir_trials": 10,
-    "n_classes": 10
+    "n_classes": 10,
+    "tasks": ['logistic_regression', 'RandomForest'],
+    "dist_metrics": ['MMD', '1-Wasserstein'],
+    "metrics": ['acc', 'f1'],
+    "streaming_metrics": ['avg_batch_time_ms'],
+    "wkh_trials": 10,
+    "onlinemmdplus_trials": 10
 }
 
 

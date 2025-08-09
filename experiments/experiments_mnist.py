@@ -15,7 +15,7 @@ if __name__ == "__main__":
     "dataset": "mnist",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["OnlineMMDPlus", "WKH", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -28,10 +28,12 @@ if __name__ == "__main__":
     "lambda_log_online": 1e-7,
     "reservoir_trials": 10,
     "n_classes": 10,
-    "tasks": ['logistic_regression', 'KNN'],
-    "dist_metrics": ['MMD'],
+    "tasks": ['logistic_regression', 'RandomForest'],
+    "dist_metrics": ['MMD', '1-Wasserstein'],
     "metrics": ['acc', 'f1'],
-    "streaming_metrics": ['avg_batch_time_ms']
+    "streaming_metrics": ['avg_batch_time_ms'],
+    "wkh_trials": 10,
+    "onlinemmdplus_trials": 10
 }
 
 

@@ -13,19 +13,25 @@ if __name__ == "__main__":
     "dataset": "adult",
     "embedding": None,
     "embed_dim": None,
-    "benchmarks": ["OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["WKH", "OnlineMMDPlus", "Reservoir"],  # only these
     "coreset_size": 30,
     "dataset_subset_size": 2500,
     "batch_size": 50,
     "n_rff_components": 1000,
     "kernel_gamma": 0.1,
     "buffer_capacity": 150,
-    "random_seed": 10921,
+    "random_seed": 131313,
     "n_epochs_online": 20,
     "lr_online": 0.1,
     "lambda_log_online": 5e-5,
     "reservoir_trials": 10,
-    "n_classes": 2
+    "n_classes": 2,
+    "tasks": ['logistic_regression'],
+    "dist_metrics": ['MMD', '1-Wasserstein'],
+    "metrics": ['acc', 'f1', 'auc'],
+    "streaming_metrics": ['avg_batch_time_ms'],
+    "wkh_trials": 10,
+    "onlinemmdplus_trials": 10
 }
 
 
