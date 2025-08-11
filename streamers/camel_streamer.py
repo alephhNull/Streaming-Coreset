@@ -178,6 +178,8 @@ class CAMELStreamer(AbstractStreamingCoreset):
             # Calculate flat indices
             flat_indices = np.array([batch_idx * self.batch_size + local_idx for batch_idx, local_idx in self._final_coreset_provenance])
 
+        self._final_coreset_weights = self._final_coreset_weights / np.sum(self._final_coreset_weights)
+
         return flat_indices, self._final_coreset_weights, self._final_coreset_provenance
 
     def print_coreset_provenance(self) -> None:

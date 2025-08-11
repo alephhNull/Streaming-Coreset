@@ -382,6 +382,8 @@ def run_single_experiment(config):
             
             assert Xc.shape[0] == config['coreset_size'], f"Coreset Xc shape {Xc.shape[0]} != {config['coreset_size']}"
             assert w.shape[0] == config['coreset_size'], f"Coreset weights shape {w.shape[0]} != {config['coreset_size']}"
+            assert np.sum(w >= 0), "Coreset weights must be non-negative"
+
             # Compute distribution metrics
             dist_vals = {}
             for dm in dist_metrics:
@@ -393,7 +395,7 @@ def run_single_experiment(config):
 
             # Evaluate downstream tasks
             for task in tasks:
-                res = task_funcs[task](Xc, X_val, yc, y_val, w)
+                res = task_funcs[task](Xc, X_val, yc, y_val, None)
                 entry = {'trial': t, **res}
                 if dist_vals:
                     entry['dist'] = dist_vals

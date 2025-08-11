@@ -54,6 +54,8 @@ def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_d
         X_train, X_val, y_train, y_val = load_covtype_data(subset_size, embed_dim, seed)
     elif dataset_name == 'svhn':
         X_train, X_val, y_train, y_val = load_svhn(subset_size, seed, embedding, embed_dim, device)
+    elif dataset_name == 'gaussian_mixture':
+        X_train, X_val, y_train, y_val = load_gaussian_mixture_2d(subset_size, seed)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -68,6 +70,54 @@ def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_d
                             batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, X_train, X_val, y_train, y_val
+
+
+from sklearn.datasets import make_spd_matrix
+
+def load_gaussian_mixture_2d(subset_size, seed, n_classes=1, n_components_per_class=5):
+    np.random.seed(seed)
+    X, y = [], []
+    total_samples = subset_size if subset_size is not None else 5000
+
+    # Highly imbalanced class distribution
+    class_probs = np.array([0.7, 0.2, 0.1])[:n_classes]
+    class_probs = class_probs / class_probs.sum()
+    class_counts = (class_probs * total_samples).astype(int)
+
+    for class_id in range(n_classes):
+        n_samples_class = class_counts[class_id]
+        weights = np.random.dirichlet(np.ones(n_components_per_class), size=1).flatten()
+
+        for comp_id in range(n_components_per_class):
+            n_samples_comp = max(1, int(weights[comp_id] * n_samples_class))
+
+            # Random mean (spread far, but biased towards a quadrant)
+            mean = np.random.randn(2) * 3 + np.array([class_id * 4, class_id * -2])
+
+            # Skewed, correlated covariance matrix
+            cov = make_spd_matrix(2)
+            cov *= np.random.uniform(0.05, 2.0)  # scale differently per component
+            if np.random.rand() < 0.5:
+                cov[0, 1] *= np.random.uniform(0.8, 0.99)  # high correlation
+
+            samples = np.random.multivariate_normal(mean, cov, size=n_samples_comp)
+            X.append(samples)
+            y.append(np.full(n_samples_comp, class_id))
+
+    X = np.vstack(X)
+    y = np.concatenate(y)
+
+    # Shuffle
+    perm = np.random.permutation(len(X))
+    X, y = X[perm], y[perm]
+
+    # Train/val split
+    n_train = int(0.8 * len(X))
+    X_train, y_train = X[:n_train], y[:n_train]
+    X_val, y_val = X[n_train:], y[n_train:]
+
+    print(f"Generated Gaussian Mixture — X_train: {X_train.shape}, X_val: {X_val.shape}, classes: {np.unique(y)}")
+    return X_train, X_val, y_train, y_val
 
 
 def load_full_svhn():
@@ -93,7 +143,7 @@ def load_svhn(subset_size, seed, embedding, embed_dim, device, cache_dir="featur
     from torch.utils.data import DataLoader
 
     os.makedirs(cache_dir, exist_ok=True)
-    cache_key = generate_cache_key('svhn', f"{embedding}_{embed_dim}")
+    cache_key = generate_cache_key('svhn', embedding)
     cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
 
     if os.path.exists(cache_path):
@@ -106,7 +156,7 @@ def load_svhn(subset_size, seed, embedding, embed_dim, device, cache_dir="featur
 
         if embedding == 'resnet18':
             resnet_transform = transforms.Compose([
-                transforms.Resize(224),
+                transforms.Resize(224, InterpolationMode.BICUBIC),
                 transforms.ToTensor(),
                 transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
             ])
@@ -314,7 +364,7 @@ def load_full_fashion_mnist():
 
 def load_fashion_mnist(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
     os.makedirs(cache_dir, exist_ok=True)
-    cache_key = generate_cache_key('fashion_mnist', f"{embedding}_{embed_dim}")
+    cache_key = generate_cache_key('fashion_mnist', embedding)
     cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
 
     if os.path.exists(cache_path):
@@ -327,7 +377,7 @@ def load_fashion_mnist(subset_size, seed, embedding, embed_dim, device, cache_di
 
         if embedding == 'resnet18':
             resnet_transform = transforms.Compose([
-                transforms.Resize(224),
+                transforms.Resize(224, InterpolationMode.BICUBIC),
                 transforms.ToTensor(),
                 GrayscaleToRGB(),
                 transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
@@ -399,7 +449,7 @@ def load_full_mnist():
 
 def load_mnist(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
     os.makedirs(cache_dir, exist_ok=True)
-    cache_key = generate_cache_key('mnist', f"{embedding}_{embed_dim}")
+    cache_key = generate_cache_key('mnist', embedding)
     cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
 
     if os.path.exists(cache_path):
@@ -412,7 +462,7 @@ def load_mnist(subset_size, seed, embedding, embed_dim, device, cache_dir="featu
 
         if embedding == 'resnet18':
             resnet_transform = transforms.Compose([
-                transforms.Resize(224),
+                transforms.Resize(224, InterpolationMode.BICUBIC),
                 transforms.ToTensor(),
                 GrayscaleToRGB(),
                 transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))

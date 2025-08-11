@@ -206,10 +206,12 @@ class WCSLStreamer(AbstractStreamingCoreset):
 
         # Build D = diag(b̃) - T̃^T diag(a^{-1}) T̃
         D = torch.diag(b_tilde) - T_tilde.T @ (a_inv.unsqueeze(1) * T_tilde)  # (m-1, m-1)
+        eps = 1e-8
+        D_reg = D + eps * torch.eye(D.shape[0], device=D.device)
 
         # Solve for s̃_v: D s̃_v = μ̃_c - T̃^T (a^{-1} ⊙ μ_r)
         rhs = mu_c_tilde - T_tilde.T @ (a_inv * mu_r)
-        s_tilde_v = torch.linalg.solve(D, rhs)  # (m-1,)
+        s_tilde_v = torch.linalg.solve(D_reg, rhs)  # (m-1,)
 
         # Compute s_u and full s_v
         s_u = a_inv * (mu_r - T_tilde @ s_tilde_v)     # (n,)

@@ -63,32 +63,6 @@ class CO2Streamer(AbstractStreamingCoreset):
             np.random.seed(random_seed)
             torch.manual_seed(random_seed)
 
-    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
-        """
-        Processes a new batch of data, adding it to the buffer and running
-        compression if the buffer exceeds its capacity.
-        """
-        batch_size = X_batch_np.shape[0]
-        
-        # Generate provenance for the new batch
-        new_provenance = [(batch_idx, i) for i in range(batch_size)]
-        new_global_indices = list(range(self.global_idx_counter, self.global_idx_counter + batch_size))
-        self.global_idx_counter += batch_size
-
-        if self.buffer.shape[0] == 0:
-            self.buffer = X_batch_np
-            self.provenance = new_provenance
-            self.global_indices = new_global_indices
-        else:
-            self.buffer = np.vstack([self.buffer, X_batch_np])
-            self.provenance.extend(new_provenance)
-            self.global_indices.extend(new_global_indices)
-
-        print(f"Processed batch {batch_idx}. Buffer size: {self.buffer.shape[0]}/{self.buffer_capacity}")
-
-        # If buffer exceeds capacity, compress it
-        if self.buffer.shape[0] > self.buffer_capacity:
-            self._compress_buffer()
 
     def _compress_buffer(self):
         """
@@ -173,7 +147,7 @@ class CO2Streamer(AbstractStreamingCoreset):
         return kernel.numpy()
     
 
-    def process_batch(self, X_batch_np: np.ndarray, batch_idx: int) -> None:
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         """
         Processes a new batch of data, assuming a fixed batch size to calculate
         global indices.
