@@ -382,7 +382,8 @@ def run_single_experiment(config):
             
             assert Xc.shape[0] == config['coreset_size'], f"Coreset Xc shape {Xc.shape[0]} != {config['coreset_size']}"
             assert w.shape[0] == config['coreset_size'], f"Coreset weights shape {w.shape[0]} != {config['coreset_size']}"
-            assert np.sum(w >= 0), "Coreset weights must be non-negative"
+            assert np.all(w >= -1e-12), "Coreset weights must be non-negative"
+
 
             # Compute distribution metrics
             dist_vals = {}

@@ -1,26 +1,16 @@
 from typing import List, Tuple
-
+from qpsolvers import solve_qp
 import numpy as np
 from sklearn.kernel_approximation import RBFSampler
 from streamers.abstract_streamer import AbstractStreamingCoreset
 
-def weighted_kernel_herding_rff(mu_pi, X_candidate, sampler, m):
+def weighted_kernel_herding_rff_qp(mu_pi, X_candidate, sampler, m):
     """
-    Fully-corrective weighted kernel herding in RFF space using a provided RBFSampler.
-    
-    Args:
-      mu_pi (np.ndarray): The (D,) Euclidean mean embedding of the dataset in RFF space.
-      X_candidate (np.ndarray): The (n_candidates, d) candidate points to pick from (original input space).
-      sampler (RBFSampler): A fitted sklearn RBFSampler used to compute mu_pi (ensures consistent mapping).
-      m (int): The desired size of the coreset.
-    
-    Returns:
-      tuple: A tuple containing:
-        - np.ndarray: An array of shape (m,) with the indices into X_candidate.
-        - np.ndarray: An array of shape (m,) with the final weights for the coreset points.
+    Fully-corrective weighted kernel herding in RFF space using a QP solver 
+    (non-negative weights, sum to 1).
     """
-    n_candidates, d_orig = X_candidate.shape
-    D = mu_pi.shape[0] # Dimension of the RFF space
+    n_candidates = X_candidate.shape[0]
+    D = mu_pi.shape[0]  # RFF feature dimension
 
     X_candidate_rff = sampler.transform(X_candidate)
     selected_indices = []
@@ -30,20 +20,35 @@ def weighted_kernel_herding_rff(mu_pi, X_candidate, sampler, m):
         residual = mu_pi - current_embedding
         search_values = X_candidate_rff @ residual
         search_values[selected_indices] = -np.inf
-        
         best_x_idx = np.argmax(search_values)
         selected_indices.append(best_x_idx)
 
+        # RFF features of selected points
         coreset_rff = X_candidate_rff[selected_indices]
-        K_rff = coreset_rff @ coreset_rff.T
-        z_rff = coreset_rff @ mu_pi
-        weights = np.linalg.pinv(K_rff) @ z_rff
-        
+
+        # QP matrices
+        K_rff = coreset_rff @ coreset_rff.T  # m x m Gram
+        z_rff = coreset_rff @ mu_pi          # m vector
+
+        # QP form: min 0.5 x^T P x + q^T x
+        eps = 1e-10
+        P = (K_rff + K_rff.T) / 2.0 + eps * np.eye(K_rff.shape[0])
+        q = -z_rff
+
+        # Equality constraint: sum w = 1
+        A = np.ones((1, len(selected_indices)))
+        b = np.array([1.0])
+
+        # Inequality: w >= 0
+        G = -np.eye(len(selected_indices))
+        h = np.zeros(len(selected_indices))
+
+        weights = solve_qp(P, q, G, h, A, b, solver="quadprog")
+
         current_embedding = weights @ coreset_rff
 
     final_weights = weights
     return np.array(selected_indices), final_weights
-
 
 class WKHStreamingCoreset(AbstractStreamingCoreset):
     """
@@ -77,7 +82,7 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
 
         # Buffers to hold current data and its origin
         self.buffer_X = np.empty((0, self.feature_dim))
-        self.buffer_y = np.empty((0,))
+        self.buffer_weights = np.empty(0, dtype=float)
         self.buffer_provenance: List[Tuple[int, int]] = []
 
         # State for tracking the global stream properties
@@ -112,13 +117,12 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
         if len(self.buffer_X) + batch_len > self.buffer_capacity:
             # Create a candidate pool from the buffer and the new batch
             X_candidate = np.vstack([self.buffer_X, X_batch_np])
-            y_candidate = np.concatenate([self.buffer_y, y_batch_np])
             
             new_provenance = [(batch_idx, i) for i in range(batch_len)]
             provenance_candidate = self.buffer_provenance + new_provenance
 
             # Run WKH to select a new, smaller buffer of size `coreset_size`
-            selected_indices, _ = weighted_kernel_herding_rff(
+            selected_indices, final_weights = weighted_kernel_herding_rff_qp(
                 mu_pi=self.mean_rff_full_stream,
                 X_candidate=X_candidate,
                 sampler=self.sampler,
@@ -127,15 +131,17 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
             
             # Update the buffer with the selected coreset points
             self.buffer_X = X_candidate[selected_indices]
-            self.buffer_y = y_candidate[selected_indices]
             self.buffer_provenance = [provenance_candidate[i] for i in selected_indices]
+            self.buffer_weights = final_weights
         else:
             # Buffer has space, just append the new batch
-            self.buffer_X = np.vstack([self.buffer_X, X_batch_np])
-            self.buffer_y = np.concatenate([self.buffer_y, y_batch_np])
+            alpha = batch_len / self.num_points_seen
+            self.buffer_weights *= (1 - alpha)
+            new_weights = np.full(batch_len, alpha / batch_len)
+            self.buffer_weights = np.concatenate((self.buffer_weights, new_weights))
             
-            new_provenance = [(batch_idx, i) for i in range(batch_len)]
-            self.buffer_provenance.extend(new_provenance)
+            self.buffer_X = np.vstack([self.buffer_X, X_batch_np])
+            self.buffer_provenance.extend([(batch_idx, i) for i in range(batch_len)])
 
     def _finalize_coreset(self):
         """Internal method to run the final reduction on the buffer."""
@@ -144,15 +150,15 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
 
         # If the final buffer is larger than the target coreset size, run one last reduction
         if len(self.buffer_X) > self.coreset_size:
-            selected_indices, _ = weighted_kernel_herding_rff(
+            selected_indices, final_weights = weighted_kernel_herding_rff_qp(
                 mu_pi=self.mean_rff_full_stream,
                 X_candidate=self.buffer_X,
                 sampler=self.sampler,
                 m=self.coreset_size
             )
             self.buffer_X = self.buffer_X[selected_indices]
-            self.buffer_y = self.buffer_y[selected_indices]
             self.buffer_provenance = [self.buffer_provenance[i] for i in selected_indices]
+            self.buffer_weights = final_weights
         
         self._finalized = True
 
@@ -168,12 +174,7 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
             dtype=int
         )
         
-        # Generate uniform weights as per the abstract class requirements
-        num_coreset_points = len(self.buffer_X)
-        if num_coreset_points == 0:
-            weights = np.array([])
-        else:
-            weights = np.ones(num_coreset_points) / num_coreset_points
+        weights = self.buffer_weights
         
         return flat_indices, weights, self.buffer_provenance
 
