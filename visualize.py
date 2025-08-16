@@ -63,22 +63,21 @@ def print_experiment_summary(config: dict,
         row = [bm]
         # downstream per task
         for task in tasks:
-            entries = result[bm][task]
+            entries = result[bm]  # Now result[bm] is a list of trials
             for m in down_ms:
-                vals = [e.get(m, np.nan) for e in entries]
+                vals = [e.get(task, {}).get(m, np.nan) for e in entries]
                 mean = np.nanmean(vals) if vals else np.nan
                 row.append(_fmt(mean))
-        # dist metrics (pick from any task; they're identical across tasks)
-        # we use the first task
-        first_entries = result[bm][tasks[0]]
+        # dist metrics (pick from any trial; they're identical across trials)
+        # we use the first trial
+        first_trial = result[bm][0] if result[bm] else {}
         for dm in dist_ms:
-            vals = [e.get('dist', {}).get(dm, np.nan) for e in first_entries]
+            vals = [e.get('dist', {}).get(dm, np.nan) for e in result[bm]]
             mean = np.nanmean(vals) if vals else np.nan
             row.append(_fmt(mean, digits=6))
         # streaming metrics (global)
-        sm_list = result[bm]['streaming_metrics']
         for sm in stream_ms:
-            vals = [s.get(sm, np.nan) for s in sm_list]
+            vals = [e.get('streaming_metrics', {}).get(sm, np.nan) for e in result[bm]]
             mean = np.nanmean(vals) if vals else np.nan
             row.append(_fmt(mean))
         rows.append(row)
@@ -115,12 +114,10 @@ def _collect_dist_curves(config_result_pairs, metric_name: str):
         tasks = config['tasks']
         benchmarks = config['benchmarks']
 
-        # We follow your table logic: distances are identical across tasks,
-        # so we use the first task.
-        first_task = tasks[0]
-
+        # We follow your table logic: distances are identical across trials,
+        # so we use any trial.
         for bm in benchmarks:
-            entries = result[bm][first_task]  # list over trials
+            entries = result[bm]  # list over trials
             # Mean over trials for this run/size:
             vals = [e.get('dist', {}).get(metric_name, np.nan) for e in entries]
             run_mean = np.nanmean(vals) if len(vals) > 0 else np.nan
@@ -135,7 +132,7 @@ def _collect_dist_curves(config_result_pairs, metric_name: str):
     return curves
 
 
-def _plot_curves(curves, metric_name: str, title: str = None):
+def _plot_curves(curves, metric_name: str, title: str = None, save_path: str = None):
     """
     Plot helper for curves produced by _collect_dist_curves.
     """
@@ -177,7 +174,7 @@ def _plot_curves(curves, metric_name: str, title: str = None):
     ax.tick_params(axis='both', which='major', labelsize=11)
 
     plt.tight_layout()
-    fig.savefig(f"results/{metric_name}_vs_coreset_size.pdf", format="pdf")
+    fig.savefig(save_path, format="pdf")
     plt.show()
 
 
@@ -195,7 +192,8 @@ def plot_mmd_vs_coreset_size(config_result_pairs):
         - Passing a single (config, result) will produce a single point.
     """
     curves = _collect_dist_curves(config_result_pairs, metric_name='MMD')
-    _plot_curves(curves, metric_name='MMD', title='MMD vs Coreset Size')
+    dataset_name  = config_result_pairs[0][0]['dataset']
+    _plot_curves(curves, metric_name='MMD', title=f'{dataset_name} MMD vs Coreset Size', save_path=f'results/{dataset_name}_mmd_vs_coreset_size.pdf')
     
 
 def plot_wasserstein_vs_coreset_size(config_result_pairs):
@@ -210,4 +208,5 @@ def plot_wasserstein_vs_coreset_size(config_result_pairs):
         - Passing a single (config, result) will produce a single point.
     """
     curves = _collect_dist_curves(config_result_pairs, metric_name='1-Wasserstein')
-    _plot_curves(curves, metric_name='1-Wasserstein', title='1-Wasserstein vs Coreset Size')
+    dataset_name  = config_result_pairs[0][0]['dataset']
+    _plot_curves(curves, metric_name='1-Wasserstein', title=f'{dataset_name} 1-Wasserstein vs Coreset Size', save_path=f'results/{dataset_name}_1-wasserstein_vs_coreset_size.pdf')

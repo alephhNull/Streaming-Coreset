@@ -21,7 +21,8 @@ def train_logistic_regression(
     X_val: np.ndarray,
     y_train: np.ndarray,
     y_val: np.ndarray,
-    weights: np.ndarray = None
+    weights: np.ndarray = None,
+    num_classes: int = None
 ) -> dict:
     unique_classes = np.unique(y_train)
 
@@ -45,7 +46,8 @@ def train_logistic_regression(
     y_proba = clf.predict_proba(X_val)[:, 1] if clf.classes_.shape[0] == 2 else None
 
     acc = accuracy_score(y_val, y_pred)
-    f1 = f1_score(y_val, y_pred, average='binary' if clf.classes_.shape[0] == 2 else 'macro', zero_division=0)
+    effective_num_classes = num_classes if num_classes is not None else clf.classes_.shape[0]
+    f1 = f1_score(y_val, y_pred, average='binary' if effective_num_classes == 2 else 'macro', zero_division=0)
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
 
     return {"acc": acc, "auc": auc, "f1": f1}
@@ -191,7 +193,7 @@ def train_linear_regression(X_train, X_val, y_train, y_val, weights=None) -> dic
     mae = np.mean(np.abs(y_val - y_pred))
     return {"rmse": rmse, "r2": r2, "mae": mae}
 
-def train_svm_classifier(X_train, X_val, y_train, y_val, weights=None) -> dict:
+def train_svm_classifier(X_train, X_val, y_train, y_val, weights=None, num_classes: int = None) -> dict:
     unique_classes = np.unique(y_train)
     if len(unique_classes) < 2:
         y_pred = np.full_like(y_val, fill_value=unique_classes[0])
@@ -203,30 +205,74 @@ def train_svm_classifier(X_train, X_val, y_train, y_val, weights=None) -> dict:
     y_proba = clf.predict_proba(X_val)[:, 1] if len(clf.classes_) == 2 else None
 
     acc = accuracy_score(y_val, y_pred)
-    f1 = f1_score(y_val, y_pred, average='binary' if len(unique_classes) == 2 else 'macro')
+    effective_num_classes = num_classes if num_classes is not None else len(unique_classes)
+    f1 = f1_score(y_val, y_pred, average='binary' if effective_num_classes == 2 else 'macro')
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
     return {"acc": acc, "auc": auc, "f1": f1}
 
-def train_random_forest_classifier(X_train, X_val, y_train, y_val, weights=None) -> dict:
+def train_random_forest_classifier(X_train, X_val, y_train, y_val, weights=None, num_classes: int = None) -> dict:
     clf = RandomForestClassifier(random_state=42)
     clf.fit(X_train, y_train, sample_weight=weights)
     y_pred = clf.predict(X_val)
     y_proba = clf.predict_proba(X_val)[:, 1] if clf.n_classes_ == 2 else None
 
     acc = accuracy_score(y_val, y_pred)
-    f1 = f1_score(y_val, y_pred, average='binary' if clf.n_classes_ == 2 else 'macro')
+    effective_num_classes = num_classes if num_classes is not None else clf.n_classes_
+    f1 = f1_score(y_val, y_pred, average='binary' if effective_num_classes == 2 else 'macro')
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
     return {"acc": acc, "auc": auc, "f1": f1}
 
-def train_xgboost_classifier(X_train, X_val, y_train, y_val, weights=None) -> dict:
-    clf = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
-    clf.fit(X_train, y_train, sample_weight=weights)
-    y_pred = clf.predict(X_val)
-    y_proba = clf.predict_proba(X_val)[:, 1] if clf.n_classes_ == 2 else None
+def train_xgboost_classifier(X_train, X_val, y_train, y_val, weights=None, num_classes: int = None) -> dict:
+    # Check if we have enough classes for classification
+    unique_classes_train = np.unique(y_train)
+    unique_classes_val = np.unique(y_val)
+    
+    if len(unique_classes_train) < 2:
+        # Not enough classes for classification
+        y_pred = np.full_like(y_val, fill_value=unique_classes_train[0])
+        return {"acc": accuracy_score(y_val, y_pred), "auc": float('nan'), "f1": float('nan')}
+    
+    # Handle case where validation set has classes not in training set
+    missing_classes = set(unique_classes_val) - set(unique_classes_train)
+    if missing_classes:
+        print(f"Warning: Validation set contains classes {missing_classes} not present in training set")
+        # Filter validation set to only include classes present in training
+        val_mask = np.isin(y_val, unique_classes_train)
+        if not np.any(val_mask):
+            # No valid validation samples
+            return {"acc": float('nan'), "auc": float('nan'), "f1": float('nan')}
+        X_val_filtered = X_val[val_mask]
+        y_val_filtered = y_val[val_mask]
+    else:
+        X_val_filtered = X_val
+        y_val_filtered = y_val
+    
+    # Remap labels to contiguous indices for XGBoost
+    present_classes = np.unique(y_train)
+    class_to_index = {c: i for i, c in enumerate(present_classes)}
+    index_to_class = {i: c for c, i in class_to_index.items()}
 
-    acc = accuracy_score(y_val, y_pred)
-    f1 = f1_score(y_val, y_pred, average='binary' if clf.n_classes_ == 2 else 'macro')
-    auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
+    y_train_encoded = np.vectorize(class_to_index.get)(y_train)
+    y_val_encoded = np.vectorize(class_to_index.get)(y_val_filtered)
+
+    is_binary = len(present_classes) == 2
+    objective = 'binary:logistic' if is_binary else 'multi:softprob'
+    clf = XGBClassifier(use_label_encoder=False, eval_metric='logloss', objective=objective,
+                        num_class=None if is_binary else len(present_classes))
+    clf.fit(X_train, y_train_encoded, sample_weight=weights)
+    y_pred_encoded = clf.predict(X_val_filtered)
+    y_pred = np.vectorize(index_to_class.get)(y_pred_encoded)
+
+    # Handle probability prediction based on number of classes
+    if is_binary:
+        y_proba = clf.predict_proba(X_val_filtered)[:, 1]
+    else:
+        y_proba = None
+
+    acc = accuracy_score(y_val_filtered, y_pred)
+    effective_num_classes = num_classes if num_classes is not None else (2 if is_binary else len(present_classes))
+    f1 = f1_score(y_val_filtered, y_pred, average='binary' if effective_num_classes == 2 else 'macro')
+    auc = roc_auc_score(y_val_filtered, y_proba) if y_proba is not None else float('nan')
     return {"acc": acc, "auc": auc, "f1": f1}
 
 def train_naive_bayes_classifier(
@@ -234,7 +280,8 @@ def train_naive_bayes_classifier(
     X_val: np.ndarray,
     y_train: np.ndarray,
     y_val: np.ndarray,
-    weights: np.ndarray = None
+    weights: np.ndarray = None,
+    num_classes: int = None
 ) -> dict:
     unique_classes = np.unique(y_train)
     if len(unique_classes) < 2:
@@ -248,7 +295,8 @@ def train_naive_bayes_classifier(
     y_proba = clf.predict_proba(X_val)[:, 1] if len(clf.classes_) == 2 else None
 
     acc = accuracy_score(y_val, y_pred)
-    f1 = f1_score(y_val, y_pred, average='binary' if len(clf.classes_) == 2 else 'macro', zero_division=0)
+    effective_num_classes = num_classes if num_classes is not None else len(clf.classes_)
+    f1 = f1_score(y_val, y_pred, average='binary' if effective_num_classes == 2 else 'macro', zero_division=0)
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
 
     return {"acc": acc, "auc": auc, "f1": f1}
@@ -259,7 +307,8 @@ def train_knn_classifier(
     y_train: np.ndarray,
     y_val: np.ndarray,
     weights: np.ndarray = None,
-    n_neighbors: int = 5
+    n_neighbors: int = 5,
+    num_classes: int = None
 ) -> dict:
     unique_classes = np.unique(y_train)
     if len(unique_classes) < 2:
@@ -273,7 +322,8 @@ def train_knn_classifier(
     y_proba = clf.predict_proba(X_val)[:, 1] if len(clf.classes_) == 2 else None
 
     acc = accuracy_score(y_val, y_pred)
-    f1 = f1_score(y_val, y_pred, average='binary' if len(clf.classes_) == 2 else 'macro', zero_division=0)
+    effective_num_classes = num_classes if num_classes is not None else len(unique_classes)
+    f1 = f1_score(y_val, y_pred, average='binary' if effective_num_classes == 2 else 'macro', zero_division=0)
     auc = roc_auc_score(y_val, y_proba) if y_proba is not None else float('nan')
 
     return {"acc": acc, "auc": auc, "f1": f1}

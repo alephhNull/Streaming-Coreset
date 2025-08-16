@@ -154,7 +154,7 @@ class OnlineMMDPlusStreamer(AbstractStreamingCoreset):
         with torch.no_grad():
             final_weights = torch.relu(self.buffer_logits.detach())
             num_nonzero = int((final_weights > 1e-9).sum().item())
-            self.sparsity_history.append(num_nonzero / max(1, self.buffer_rffs.shape[0]))
+            self.sparsity_history.append(num_nonzero)
 
     # ----------------------- Buffer pruning -----------------------
     def _prune_buffer(self):
@@ -260,9 +260,9 @@ class OnlineMMDPlusStreamer(AbstractStreamingCoreset):
         if self.buffer_rffs is not None and self.buffer_rffs.shape[0] > self.buffer_capacity:
             self._prune_buffer()
 
-        sparsity_ratio = self.sparsity_history[-1] if self.sparsity_history else 0.0
+        num_nonzero_weights = self.sparsity_history[-1] if self.sparsity_history else 0.0
         # Minimal logging; place expensive prints behind a debug flag if needed
-        print(f"   Batch {batch_idx} processed. Sparsity: {sparsity_ratio:.2%}")
+        print(f"   Batch {batch_idx} processed. Num non-zero weights: {num_nonzero_weights}")
 
     # ----------------------- Final coreset extraction -----------------------
     def get_final_coreset(self):

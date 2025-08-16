@@ -25,7 +25,6 @@ if __name__ == "__main__":
     "batch_size": 50,
     "n_rff_components": 1000,
     "kernel_gamma": 0.001,
-    "buffer_capacity": 150,
     "random_seed": 1421380,
     "n_epochs_online": 20,
     "lr_online": 0.1,
@@ -51,7 +50,7 @@ if __name__ == "__main__":
         config_result_pairs.append((config, result))
 
 
-    with open("results/mnist_dist_metrics_vs_coreset_size.json", "w") as f:
+    with open("results/dummy_mnist_dist_metrics_vs_coreset_size.json", "w") as f:
             json.dump(config_result_pairs, f, indent=2)
 
     # with open("mnist_dist_metrics_vs_coreset_size.json", "r") as f:

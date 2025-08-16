@@ -291,13 +291,17 @@ def run_single_experiment(config):
     experiment_result['whole_data'] = {}
     for task in tasks:
         func = task_funcs[task]
-        res = func(X_train, X_val, y_train, y_val)
+        classification_task_names = set(['logistic_regression', 'SVM', 'KNN', 'NaiveBayes', 'RandomForest', 'XGBoost'])
+        if task in classification_task_names:
+            # Pass num_classes explicitly to avoid inferring from unique labels
+            res = func(X_train, X_val, y_train, y_val, None, config.get('n_classes'))
+        else:
+            res = func(X_train, X_val, y_train, y_val)
         experiment_result['whole_data'][task] = res
 
     # Streaming benchmarks
     for bm in benchmarks:
-        experiment_result[bm] = {task: [] for task in tasks}
-        experiment_result[bm]['streaming_metrics'] = []
+        experiment_result[bm] = []  # List of trials instead of dict of tasks
 
         for t in range(trials[bm]):
             # Choose the coreset method
@@ -384,7 +388,6 @@ def run_single_experiment(config):
             assert w.shape[0] == config['coreset_size'], f"Coreset weights shape {w.shape[0]} != {config['coreset_size']}"
             assert np.all(w >= -1e-12), "Coreset weights must be non-negative"
 
-
             # Compute distribution metrics
             dist_vals = {}
             for dm in dist_metrics:
@@ -393,15 +396,25 @@ def run_single_experiment(config):
                 elif dm == '1-Wasserstein':
                     dist_vals['1-Wasserstein'] = calculate_wass_distance(X_train, Xc, w)
 
-
-            # Evaluate downstream tasks
+            # Create trial entry with all information
+            trial_entry = {
+                'trial': t,
+                'streaming_metrics': stream_meta
+            }
+            
+            # Add distribution metrics if any
+            if dist_vals:
+                trial_entry['dist'] = dist_vals
+            
+            # Add task results
             for task in tasks:
-                res = task_funcs[task](Xc, X_val, yc, y_val, None)
-                entry = {'trial': t, **res}
-                if dist_vals:
-                    entry['dist'] = dist_vals
-                experiment_result[bm][task].append(entry)
+                classification_task_names = set(['logistic_regression', 'SVM', 'KNN', 'NaiveBayes', 'RandomForest', 'XGBoost'])
+                if task in classification_task_names:
+                    res = task_funcs[task](Xc, X_val, yc, y_val, None, config.get('n_classes'))
+                else:
+                    res = task_funcs[task](Xc, X_val, yc, y_val, None)
+                trial_entry[task] = res
 
-            experiment_result[bm]['streaming_metrics'].append(stream_meta)
+            experiment_result[bm].append(trial_entry)
 
     return experiment_result
