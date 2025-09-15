@@ -8,7 +8,6 @@ from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-fetch_ucimlrepo = None
 from sklearn.datasets import fetch_openml
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -91,14 +90,10 @@ def get_adult_data(num_samples=1000):
     """
     print("Fetching Adult dataset...")
     df_original = None
-    try:
-        ds = fetch_ucimlrepo(id=2)
-        df_original = ds.data.original
-    except Exception as e:
-        print(f"ucimlrepo failed: {e}, falling back to openml.")
-        oml = fetch_openml(name="adult", version=2, as_frame=True)
-        df_original = oml.frame
-        df_original.rename(columns={'class': 'income'}, inplace=True)
+    
+    oml = fetch_openml(name="adult", version=2, as_frame=True)
+    df_original = oml.frame
+    df_original.rename(columns={'class': 'income'}, inplace=True)
 
     # Clean the entire DataFrame first
     df = df_original.replace([' ?', '?'], np.nan).dropna().reset_index(drop=True)
@@ -420,8 +415,7 @@ class MultiFairADMMSubset:
 # Replace the previous baseline_fair_mirror with this function in your script.
 
 def baseline_fair_mirror(P_tensor, sensitive_cols, outcome_idx, sigma, m,
-                         select_alternate_freq=2, md_iterations=200, eta=0.1,
-                         target_mode='marginal_p', verbose=False):
+                         select_alternate_freq=2, md_iterations=200, eta=0.1, verbose=False):
     """
     1) Select coreset S with weighted_kernel_herding_frank_wolfe_alternate (alternating MMD/fairness).
     2) Optimize weights on the selected support using Mirror Descent (entropy mirror / EG).
@@ -451,16 +445,7 @@ def baseline_fair_mirror(P_tensor, sensitive_cols, outcome_idx, sigma, m,
     for key, s_col in sensitive_cols_sub.items():
         groups = list(s_col.unique())
         masks = [(s_col == g).to_numpy(dtype=bool) for g in groups]   # length m boolean masks (subset)
-        if target_mode == 'equal':
-            p_g = np.ones(len(groups), dtype=float) / float(len(groups))
-        elif target_mode == 'proportional':
-            sizes = np.array([mask.sum() for mask in masks], dtype=float)
-            p_g = sizes / sizes.sum()
-        elif target_mode == 'marginal_p':
-            p_g = None
-        else:
-            raise ValueError("unknown target_mode")
-        attr_info.append({'name': key, 'groups': groups, 'masks': masks, 'p_g': p_g})
+        attr_info.append({'name': key, 'groups': groups, 'masks': masks})
 
     # global marginal positive rate (from full dataset) - used in marginal_p correction
     p_global = float(outcome_idx.cpu().numpy().mean())
@@ -486,29 +471,8 @@ def baseline_fair_mirror(P_tensor, sensitive_cols, outcome_idx, sigma, m,
         tilde = np.exp(log_z)
         tilde = tilde / (tilde.sum() + eps)
 
-        # Apply per-attribute corrections on the subset
-        if target_mode in ('equal', 'proportional'):
-            # simple per-group rescaling to match p_g for each attribute
-            for attr in attr_info:
-                masks = attr['masks']
-                p_g = attr['p_g']
-                S_g = np.array([tilde[mask].sum() for mask in masks], dtype=float)
-                for idx_g, mask in enumerate(masks):
-                    if S_g[idx_g] <= eps:
-                        group_inds = np.where(mask)[0]
-                        if len(group_inds) == 0:
-                            continue
-                        tiny = 1e-12
-                        tilde[group_inds] = tiny / float(len(group_inds))
-                    else:
-                        scale = p_g[idx_g] / (S_g[idx_g] + eps)
-                        tilde[mask] = tilde[mask] * scale
-                tilde = tilde / (tilde.sum() + eps)
-
-
-        else:  # target_mode == 'marginal_p' -> closed-form per-group marginal-positive correction
-            # NOTE: exact per-attribute closed-form projection requires attribute groups to partition the subset.
-            for attr in attr_info:
+        # NOTE: exact per-attribute closed-form projection requires attribute groups to partition the subset.
+        for attr in attr_info:
                 masks = attr['masks']   # list of boolean masks (length m_sub)
                 for mask in masks:
                     group_inds = np.where(mask)[0]
@@ -612,7 +576,6 @@ def baseline_fair_mirror(P_tensor, sensitive_cols, outcome_idx, sigma, m,
         history['subset_unweighted_dp'].append(subset_unw_dp)
 
         if verbose and (it % max(1, md_iterations // 5) == 0):
-            if target_mode == 'marginal_p':
                 # compute worst residual
                 worst_resid = 0.0
                 for attr in attr_info:
@@ -620,11 +583,8 @@ def baseline_fair_mirror(P_tensor, sensitive_cols, outcome_idx, sigma, m,
                         Sg = float(z[mask].sum())
                         Tg = float((z * outcome_sub)[mask].sum())
                         resid = abs(Tg - p_global * Sg)
-                        print("resid (should be ~0):", resid)
                         worst_resid = max(worst_resid, resid)
                 print(f"[FairMirror-MD it {it+1}/{md_iterations}] MMD={mmd_val:.6g} | pen={penalty_val:.6g} | worst_resid={worst_resid:.6g}")
-            else:
-                print(f"[FairMirror-MD it {it+1}/{md_iterations}] MMD={mmd_val:.6g} | pen={penalty_val:.6g} | max_dp={max_dp:.6g}")
 
     # After MD: return full vector with subset weights (z)
     w_full = np.zeros(P_np.shape[0], dtype=float)
@@ -769,8 +729,7 @@ def main():
         "Standard WKH": lambda: baseline_standard_wkh(P_np, K_full_np, M_CORESET),
         # "Alternate + ADMM": lambda: baseline_multi_fair_admm(P, sensitive_cols, y, SIGMA_RBF, M_CORESET),
 "Fair Mirror (MD)": lambda: baseline_fair_mirror(P, sensitive_cols, y, SIGMA_RBF, M_CORESET,
-                                               select_alternate_freq=2, md_iterations=200, eta=1,
-                                               target_mode='marginal_p', verbose=True),
+                                               select_alternate_freq=2, md_iterations=200, eta=1, verbose=True),
 }
 
     results = []

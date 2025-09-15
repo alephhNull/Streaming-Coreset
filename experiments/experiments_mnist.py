@@ -16,7 +16,7 @@ if __name__ == "__main__":
     "dataset": "mnist",
     "embedding": 'resnet18',
     "embed_dim": 50,
-    "benchmarks": ["OnlineMMDPlus", "CO2", "CAMEL", "FreeSel", "GSS", "SSD", "SuperSampling", "WKH", "MMD_Critic", "WCSL", "Reservoir"],  # only these
+    "benchmarks": ["MDH", "WKH", "OnlineMMDPlus", "Reservoir"],  # only these
     "coreset_size": 150,
     "dataset_subset_size": 2500,
     "batch_size": 50,
@@ -33,8 +33,9 @@ if __name__ == "__main__":
     "dist_metrics": ['MMD', '1-Wasserstein'],
     "metrics": ['acc'],
     "streaming_metrics": [],
-    "wkh_trials": 5,
-    "onlinemmdplus_trials": 5,
+    "wkh_trials": 3,
+    "onlinemmdplus_trials": 3,
+    "mdh_trials": 3,
     "supersampling_trials": 1,
 }
 

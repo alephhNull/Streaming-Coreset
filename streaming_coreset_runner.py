@@ -16,6 +16,7 @@ from streamers.freesel_streamer import FreeSelStreamer
 from streamers.gss_streamer import GSSStreamer
 from streamers.ssd_streamer import SSDStreamer
 from streamers.rff_wkh_streamer import WKHStreamingCoreset
+from streamers.mirror_descent_streamer import MirrorDescentHerdingStreamer
 
 from dataloaders import load_dataset
 from utils import calculate_mmd2_exact, calculate_wass_distance
@@ -244,6 +245,26 @@ def run_ssd(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capa
 
     return Xc, yc, w, metrics
 
+def run_mdh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff, gamma, seed, arrival_interval_ms):
+
+    sampler = RBFSampler(gamma=gamma, n_components=n_rff, random_state=seed)
+    sampler.fit(X_train)
+
+    mdh_streamer = MirrorDescentHerdingStreamer(
+        coreset_size=coreset_size,
+        buffer_capacity=buffer_capacity,
+        sampler=sampler,
+        batch_size=train_loader.batch_size,
+        md_iterations=20,
+        eta=1,
+        verbose=False
+    )
+
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(mdh_streamer, train_loader, X_train, y_train, arrival_interval_ms)
+
+    return Xc, yc, w, metrics
+
 def run_single_experiment(config):
     # Unpack config and parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -372,12 +393,12 @@ def run_single_experiment(config):
                     config['n_rff_components'], config['kernel_gamma'],
                     config['random_seed'] + t, config.get('arrival_interval')
                 )
-            elif bm == 'SuperSampling':
-                Xc, yc, w, stream_meta = run_super_sampling(
+            elif bm == 'MDH':
+                Xc, yc, w, stream_meta = run_mdh(
                     train_loader, X_train, y_train,
                     config['coreset_size'], config['buffer_capacity'],
-                    config['n_rff_components'], config['random_seed'] + t,
-                    config.get('arrival_interval')
+                    config['n_rff_components'], config['kernel_gamma'],
+                    config['random_seed'] + t, config.get('arrival_interval')
                 )
             else:
                 raise ValueError(f"Unknown benchmark: {bm}")
@@ -387,6 +408,9 @@ def run_single_experiment(config):
             assert Xc.shape[0] == config['coreset_size'], f"Coreset Xc shape {Xc.shape[0]} != {config['coreset_size']}"
             assert w.shape[0] == config['coreset_size'], f"Coreset weights shape {w.shape[0]} != {config['coreset_size']}"
             assert np.all(w >= -1e-12), "Coreset weights must be non-negative"
+            if not np.all(w >= 0):
+                w += 1e-12
+            
 
             # Compute distribution metrics
             dist_vals = {}
