@@ -431,6 +431,57 @@ from streamers.abstract_streamer import AbstractStreamingCoreset
 from typing import Tuple, List
 import numpy as np
 # from sklearn.kernel_approximation import RBFSampler  # type: ignore
+from qpsolvers import solve_qp
+
+
+def weighted_kernel_herding_rff_qp(mu_pi, X_candidate, sampler, m):
+    """
+    Fully-corrective weighted kernel herding in RFF space using a QP solver 
+    (non-negative weights, sum to 1).
+    """
+
+    X_candidate = X_candidate.astype(np.float64)
+    n_candidates = X_candidate.shape[0]
+    D = mu_pi.shape[0]  # RFF feature dimension
+
+    X_candidate_rff = sampler.transform(X_candidate)
+    selected_indices = []
+    current_embedding = np.zeros(D)
+
+    for k in range(m):
+        residual = mu_pi - current_embedding
+        search_values = X_candidate_rff @ residual
+        search_values[selected_indices] = -np.inf
+        best_x_idx = np.argmax(search_values)
+        selected_indices.append(best_x_idx)
+
+        # RFF features of selected points
+        coreset_rff = X_candidate_rff[selected_indices]
+
+        # QP matrices
+        K_rff = coreset_rff @ coreset_rff.T  # m x m Gram
+        z_rff = coreset_rff @ mu_pi          # m vector
+
+        # QP form: min 0.5 x^T P x + q^T x
+        eps = 1e-10
+        P = (K_rff + K_rff.T) / 2.0 + eps * np.eye(K_rff.shape[0])
+        q = -z_rff
+
+        # Equality constraint: sum w = 1
+        A = np.ones((1, len(selected_indices)))
+        b = np.array([1.0])
+
+        # Inequality: w >= 0
+        G = -np.eye(len(selected_indices))
+        h = np.zeros(len(selected_indices))
+
+        weights = solve_qp(P, q, G, h, A, b, solver="quadprog")
+
+
+        current_embedding = weights @ coreset_rff
+
+    final_weights = weights
+    return np.array(selected_indices), final_weights
 
 def weighted_kernel_herding_rff_md_after_selection(
     mu_pi: np.ndarray,
@@ -561,83 +612,100 @@ def weighted_kernel_herding_rff_md(
     verbose: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Fully-corrective weighted kernel herding in RFF space with Mirror Descent (EG)
-    to obtain non-negative simplex weights (no QP).
-
-    Args:
-        mu_pi: mean embedding in RFF space (D,)
-        X_candidate: raw candidates in input space (N, input_dim)
-        sampler: fitted RBFSampler instance
-        m: number of points to select
-        md_iterations: iterations of EG used to compute weights for the current support
-        eta: EG step-size
-        ridge: small regularizer (kept for compatibility, not used in RFF-based GD)
-        verbose: printing
-
-    Returns:
-        selected_indices (np.array of length <= m), final_weights (weights on selected set summing to 1)
+    Same semantics as your original function but implemented in NumPy for lower overhead,
+    with warm-starting for MD and early stopping on convergence to reduce effective iterations.
     """
     X_candidate_rff = sampler.transform(X_candidate)  # (N, D)
     N, D = X_candidate_rff.shape
 
-    selected_indices: List[int] = []
-    current_embedding = np.zeros(D, dtype=float)
-    weights = np.zeros(0, dtype=float)
+    if m <= 0 or N == 0:
+        return np.array([], dtype=int), np.array([], dtype=float)
 
-    # mask for candidates already selected
+    dtype = mu_pi.dtype
+    selected_indices = []
+    current_embedding = np.zeros(D, dtype=dtype)
     selected_mask = np.zeros(N, dtype=bool)
 
+    eps = 1e-12
+    tol = 1e-6
+    max_iter = md_iterations
+
+    # Preallocate coreset_rff
+    coreset_rff = np.zeros((m, D), dtype=dtype)
+    weights = np.array([], dtype=dtype)
+
     for k in range(m):
-        residual = mu_pi - current_embedding  # (D,)
+        residual = mu_pi - current_embedding
+        search_values = np.dot(X_candidate_rff, residual)
+        search_values[selected_indices] = -np.inf
+        best_x_idx = np.argmax(search_values)
+        if search_values[best_x_idx] == -np.inf:
+            if verbose:
+                print(f"Selection stopped early at k={k}: no remaining candidates.")
+            break
 
-        # score each candidate by inner-product with residual
-        search_values = X_candidate_rff.dot(residual)  # (N,)
-        search_values[selected_mask] = -np.inf
-
-        best_x_idx = int(np.argmax(search_values))
         selected_indices.append(best_x_idx)
         selected_mask[best_x_idx] = True
 
-        # features of current support
-        coreset_rff = X_candidate_rff[selected_indices]  # (s, D)
-        s = coreset_rff.shape[0]
+        # Add to coreset_rff
+        coreset_rff[k] = X_candidate_rff[best_x_idx]
+        s = k + 1
 
-        # Gram and z in RFF-space
-        K_rff = coreset_rff.dot(coreset_rff.T)  # (s, s)
-        z_rff = coreset_rff.dot(mu_pi)          # (s,)
+        # Compute K_rff and z_rff using only first s rows
+        coreset_slice = coreset_rff[:s]
+        K_rff = np.dot(coreset_slice, coreset_slice.T)  # (s, s)
+        z_rff = np.dot(coreset_slice, mu_pi)  # (s,)
 
-        # Mirror Descent (Exponentiated Gradient) on simplex for this support
-        if s == 1:
-            weights = np.array([1.0], dtype=float)
+        # Add ridge if specified
+        if ridge > 0:
+            K = K_rff + ridge * np.eye(s, dtype=dtype)
         else:
-            z = np.ones(s, dtype=float) / float(s)
-            eps = 1e-12
-            for it in range(md_iterations):
-                # gradient of ||mu - sum_i w_i x_i||^2 = 2*K_rff z - 2*z_rff
-                grad = 2.0 * (K_rff.dot(z)) - 2.0 * z_rff
+            K = K_rff
 
-                # EG update in log-space (stable)
+        # Mirror Descent with warm-start
+        if s == 1:
+            z = np.array([1.0], dtype=dtype)
+        else:
+            z = np.zeros(s, dtype=dtype)
+            z[:s-1] = weights * (1.0 - eps)
+            z[-1] = eps
+            for it in range(max_iter):
+                old_z = z.copy()
+                Kz = np.dot(K, z)
+                grad = 2 * Kz - 2 * z_rff
                 log_z = np.log(z + eps) - eta * grad
-                log_z = log_z - log_z.max()
+                log_z -= np.max(log_z)
                 z = np.exp(log_z)
-                z = z / (z.sum() + eps)
+                z /= (z.sum() + eps)
+                if np.max(np.abs(z - old_z)) < tol:
+                    if verbose:
+                        print(f"MD converged at iter {it+1} for s={s}")
+                    break
 
-            weights = z
-
-        # update current_embedding for next greedy step
-        current_embedding = weights.dot(coreset_rff)  # (D,)
+        weights = z
+        current_embedding = np.dot(weights, coreset_slice)
 
         if verbose:
-            # compute current RFF-MMD squared: ||mu - sum w x||^2
-            mmd_rff = float(np.sum((mu_pi - current_embedding) ** 2))
+            mmd_rff = np.sum((mu_pi - current_embedding) ** 2)
             print(f"[RFF sel {k+1}/{m}] picked {best_x_idx} | rff-mmd={mmd_rff:.6g}")
 
-    final_weights = weights
+    selected_indices = selected_indices[:len(weights)]  # Truncate if early stop
+
+    if len(selected_indices) == 0:
+        return np.array([], dtype=int), np.array([], dtype=float)
+
+    final_weights = np.maximum(weights, 0.0)
+    ssum = final_weights.sum()
+    if ssum > 0:
+        final_weights /= (ssum + 1e-12)
+    else:
+        final_weights = np.ones_like(final_weights) / len(final_weights)
+
     return np.array(selected_indices, dtype=int), final_weights
 
 
 def baseline_mirror_descent_rff(
-    P_tensor: torch.Tensor,
+    X_candidate: np.ndarray,
     sampler: RBFSampler,
     m: int,
     mu_pi: np.ndarray,
@@ -652,12 +720,10 @@ def baseline_mirror_descent_rff(
 
     Note: P_tensor is expected to be the candidate *raw* inputs (not RFFs) so we can transform with sampler.
     """
-    P_np = P_tensor.cpu().numpy()
-    X_rff = sampler.transform(P_np)  # (N, D)
 
     S_indices, sel_weights = weighted_kernel_herding_rff_md(
         mu_pi,
-        P_np,
+        X_candidate,
         sampler,
         m,
         md_iterations=md_iterations,
@@ -668,13 +734,13 @@ def baseline_mirror_descent_rff(
 
     # S_indices, sel_weights = weighted_kernel_herding_rff_qp(
     #     mu_pi,
-    #     P_np,
+    #     X_candidate,
     #     sampler,
     #     m
     # )
 
     # Build full vector of length N with zeros except on S_indices
-    N = P_np.shape[0]
+    N = X_candidate.shape[0]
     w_full = np.zeros(N, dtype=float)
     if len(S_indices) > 0:
         w_full[S_indices] = np.maximum(sel_weights, 0.0)
@@ -803,10 +869,10 @@ class MirrorDescentHerdingStreamer(AbstractStreamingCoreset):
             y_candidate = self.buffer_y
             provenance_candidate = list(self.buffer_provenance)
 
-            P_tensor = torch.tensor(X_candidate, dtype=torch.float32)
+            # P_tensor = torch.tensor(X_candidate, dtype=torch.float32)
 
             w_full, history = baseline_mirror_descent_rff(
-                P_tensor,
+                X_candidate,
                 self.sampler,
                 self.coreset_size,
                 self.mean_rff_full_stream,
@@ -861,10 +927,9 @@ class MirrorDescentHerdingStreamer(AbstractStreamingCoreset):
             y_candidate = self.buffer_y
             provenance_candidate = list(self.buffer_provenance)
 
-            P_tensor = torch.tensor(X_candidate, dtype=torch.float32)
 
             w_full, history = baseline_mirror_descent_rff(
-                P_tensor,
+                X_candidate,
                 self.sampler,
                 self.coreset_size,
                 self.mean_rff_full_stream,

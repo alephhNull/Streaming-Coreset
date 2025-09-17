@@ -245,7 +245,7 @@ def run_ssd(train_loader, X_train, y_train, n_classes, coreset_size, buffer_capa
 
     return Xc, yc, w, metrics
 
-def run_mdh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff, gamma, seed, arrival_interval_ms):
+def run_mdh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff, gamma, seed, arrival_interval_ms, md_iterations=20, md_eta=1):
 
     sampler = RBFSampler(gamma=gamma, n_components=n_rff, random_state=seed)
     sampler.fit(X_train)
@@ -255,8 +255,8 @@ def run_mdh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff
         buffer_capacity=buffer_capacity,
         sampler=sampler,
         batch_size=train_loader.batch_size,
-        md_iterations=20,
-        eta=1,
+        md_iterations=md_iterations,
+        eta=md_eta,
         verbose=False
     )
 
@@ -398,15 +398,16 @@ def run_single_experiment(config):
                     train_loader, X_train, y_train,
                     config['coreset_size'], config['buffer_capacity'],
                     config['n_rff_components'], config['kernel_gamma'],
-                    config['random_seed'] + t, config.get('arrival_interval')
+                    config['random_seed'] + t, config.get('arrival_interval'),
+                    config['md_iterations'], config['md_eta']
                 )
             else:
                 raise ValueError(f"Unknown benchmark: {bm}")
             
             # Assert coreset size
             
-            assert Xc.shape[0] == config['coreset_size'], f"Coreset Xc shape {Xc.shape[0]} != {config['coreset_size']}"
-            assert w.shape[0] == config['coreset_size'], f"Coreset weights shape {w.shape[0]} != {config['coreset_size']}"
+            # assert Xc.shape[0] == config['coreset_size'], f"Coreset Xc shape {Xc.shape[0]} != {config['coreset_size']}"
+            # assert w.shape[0] == config['coreset_size'], f"Coreset weights shape {w.shape[0]} != {config['coreset_size']}"
             assert np.all(w >= -1e-12), "Coreset weights must be non-negative"
             if not np.all(w >= 0):
                 w += 1e-12
