@@ -4,3 +4,5 @@
 /checkpoints/
 /feature_cache/
 /streamers/__pycache__/
+/*.json
+/*.png

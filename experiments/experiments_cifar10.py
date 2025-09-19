@@ -23,11 +23,11 @@ if __name__ == "__main__":
     "coreset_size": 150,
     "buffer_capacity": 150,
     "lambda_log_online": 5e-7,
-    "embed_dim": 256,
-    "benchmarks": ["OnlineMMDPlus", "WKH", "Reservoir"],  # only these
-    "dataset_subset_size": 5000,
+    "embed_dim": None,
+    "benchmarks": ["MDH", "WKH", "Reservoir"],  # only these
+    "dataset_subset_size": 2500,
     "batch_size": 50,
-    "n_rff_components": 2000,
+    "n_rff_components": 1000,
     "kernel_gamma": 0.001,
     "random_seed": 1421380,
     "n_epochs_online": 20,
@@ -36,11 +36,14 @@ if __name__ == "__main__":
     "n_classes": 10,
     "dist_metrics": ['MMD', '1-Wasserstein'],
     "metrics": ['acc'],
-    "streaming_metrics": [],
-    "tasks": ['logistic_regression', 'RandomForest', 'SVM', 'KNN', 'XGBoost'],
+    "streaming_metrics": ['avg_batch_time_ms'],
+    "tasks": ['logistic_regression', 'RandomForest', 'SVM'],
     "onlinemmdplus_trials": 3,
     "wkh_trials": 3,
     "supersampling_trials": 5,
+    "mdh_trials": 1,
+    "md_eta": 10,
+    "md_iterations": 100
 }
     
     result = run_single_experiment(config_base)

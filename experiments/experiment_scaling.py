@@ -15,9 +15,9 @@ if __name__ == "__main__":
 
     # base config (you provided)
     base_config = {
-        "dataset": "mnist",
+        "dataset": "cifar10",
         "embedding": 'resnet18',
-        "embed_dim": 50,
+        "embed_dim": None,
         "benchmarks": ["MDH", "WKH", "Reservoir"],  # only these
         "coreset_size": 200,   # will overwrite below
         "dataset_subset_size": 2500,
