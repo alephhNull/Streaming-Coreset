@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
+import torch
 
 # -------------------------
 # Utilities
@@ -23,9 +24,6 @@ def project_to_simplex(v: np.ndarray) -> np.ndarray:
     return w / w.sum()
 
 
-# -------------------------
-# Mirror Descent (full-weight vector on given candidates)
-# -------------------------
 def mirror_descent_weights_on_candidates_rff(
     X_candidate_rff: np.ndarray,
     mu_pi: np.ndarray,
@@ -37,60 +35,87 @@ def mirror_descent_weights_on_candidates_rff(
     verbose: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
-    Run entropic mirror descent (EG-like) to find weights on the simplex
+    Run entropic mirror descent to find weights on the simplex
     for the provided candidate RFFs (full-length weight vector).
+    Uses PyTorch autograd for efficient gradient computation.
     Returns w_full (length = number of candidates) and history dict.
 
     X_candidate_rff: (N, D)
     mu_pi: (D,)
     """
-    N, D = X_candidate_rff.shape
-    dtype = X_candidate_rff.dtype if np.issubdtype(X_candidate_rff.dtype, np.floating) else float
-
-    # Build kernel matrix in RFF space: K = X X^T (N,N)
-    # and z_rff = X @ mu_pi (N,)
-    K = np.dot(X_candidate_rff, X_candidate_rff.T)
-    if ridge > 0:
-        K = K + ridge * np.eye(N, dtype=dtype)
-    z_rff = np.dot(X_candidate_rff, mu_pi)  # (N,)
-
-    # initialize z
+    N = X_candidate_rff.shape[0]
+    device = torch.device("cuda" if torch.cuda.is_available() and N > 5000 else "cpu")  # Threshold for GPU; tune based on your hardware
+    X = torch.from_numpy(X_candidate_rff).float().to(device)
+    mu = torch.from_numpy(mu_pi).float().to(device)
+    _, D = X.shape
     eps = 1e-12
+
     if initial_weights is None:
-        z = np.ones(N, dtype=float) / float(N)
+        z = torch.full((N,), 1.0 / float(N), dtype=torch.float, device=device)
     else:
-        z = np.asarray(initial_weights, dtype=float).copy()
-        if z.size != N:
-            # if initial is shorter/longer, try to adapt (trim or pad)
-            tmp = np.zeros(N, dtype=float)
-            tmp[: min(N, z.size)] = z[: min(N, z.size)]
-            z = tmp
-        # ensure positivity & normalization
-        z = np.maximum(z, eps)
-        z = z / (z.sum() + eps)
+        z_np = np.asarray(initial_weights, dtype=float).copy()
+        if z_np.size != N:
+            z_np = np.zeros(N, dtype=float)
+            z_np[:min(N, len(z_np))] = initial_weights[:min(N, len(initial_weights))]
+        z = torch.from_numpy(z_np).float().to(device)
+        z = torch.clamp(z, min=eps)
+        z = z / z.sum()
 
     history = {"md_iters": 0}
 
     for it in range(md_iterations):
-        old_z = z.copy()
-        Kz = K.dot(z)  # (N,)
-        grad = 2.0 * Kz - 2.0 * z_rff  # gradient of z^T K z - 2 z^T z_rff
-        # mirror (exponentiated gradient) step
-        log_z = np.log(z + eps) - eta * grad
-        log_z -= np.max(log_z)  # stability
-        z = np.exp(log_z)
+        old_z = z.clone()
+
+        # Compute gradient via autograd
+        z.requires_grad_(True)
+        embed = torch.matmul(X.t(), z)  # (D,) = X.t() (D,N) @ z (N,)
+        loss = torch.sum((mu - embed) ** 2) + ridge * torch.sum(z ** 2)
+        grad = torch.autograd.grad(loss, z, create_graph=False)[0]
+        z.requires_grad_(False)  # Detach for manual update
+
+        # Mirror (exponentiated gradient) step
+        log_z = torch.log(z + eps) - eta * grad
+        log_z -= torch.max(log_z)  # Stability
+        z = torch.exp(log_z)
         z_sum = z.sum()
         if z_sum <= 0:
-            z = np.ones_like(z) / float(N)
+            z = torch.full_like(z, 1.0 / float(N))
         else:
             z /= (z_sum + eps)
+
         history["md_iters"] = it + 1
-        if np.max(np.abs(z - old_z)) < tol:
+        if torch.max(torch.abs(z - old_z)) < tol:
             if verbose:
                 print(f"MD converged in {it+1} iters for N={N}")
             break
 
-    return z, history
+    return z.cpu().numpy(), history
+
+# Updated wrapper (unchanged)
+def mirror_descent_wrapper_for_stream(
+    X_candidate_rff: np.ndarray,
+    mu_pi: np.ndarray,
+    md_iterations: int = 200,
+    eta: float = 0.1,
+    ridge: float = 1e-8,
+    initial_weights: Optional[np.ndarray] = None,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Wrapper that runs mirror descent on candidate RFFs and returns full-length weights.
+    X_candidate_rff is already RFF-transformed.
+    """
+    w, hist = mirror_descent_weights_on_candidates_rff(
+        X_candidate_rff,
+        mu_pi,
+        md_iterations=md_iterations,
+        eta=eta,
+        ridge=ridge,
+        initial_weights=initial_weights,
+        tol=1e-6,
+        verbose=verbose,
+    )
+    return w, hist
 
 
 # -------------------------
@@ -184,15 +209,8 @@ def weighted_kernel_herding_rff_md(
         s_now = k + 1
 
         # Now compute fully-corrective weights for the selected s_now candidates via MD
-        # Build small K and z_rff for selected slice
+        # Use the scalable autograd version instead of explicit K
         slice_rff = coreset_rff[:s_now]
-        K_rff = np.dot(slice_rff, slice_rff.T)
-        if ridge > 0:
-            K = K_rff + ridge * np.eye(s_now, dtype=float)
-        else:
-            K = K_rff
-        z_rff = np.dot(slice_rff, mu_pi)
-
         # Warm start vector for MD on the small set
         if s_now == 1:
             z = np.array([1.0], dtype=float)
@@ -206,17 +224,17 @@ def weighted_kernel_herding_rff_md(
             # normalize
             z = project_to_simplex(z)
 
-            # Mirror descent on small scale (explicit small K)
-            for it in range(max_iter):
-                old_z = z.copy()
-                Kz = np.dot(K, z)
-                grad = 2.0 * Kz - 2.0 * z_rff
-                log_z = np.log(z + eps) - eta * grad
-                log_z -= np.max(log_z)
-                z = np.exp(log_z)
-                z /= (z.sum() + eps)
-                if np.max(np.abs(z - old_z)) < tol:
-                    break
+        # Call autograd MD
+        z, _ = mirror_descent_weights_on_candidates_rff(
+            slice_rff,
+            mu_pi,
+            md_iterations=max_iter,
+            eta=eta,
+            ridge=ridge,
+            initial_weights=z,
+            tol=tol,
+            verbose=verbose,
+        )
 
         weights = z
 
@@ -385,38 +403,29 @@ class MirrorDescentHerdingStreamer:
             else:
                 w_full = np.ones_like(w_full) / float(len(w_full))
 
-            # 3) removal loop: remove singletons (or batch) until buffer fits
-            # We'll remove one-by-one (exact greedy). You can increase remove_batch for speed.
-            remove_batch = 1
-            X_buf_rff = X_candidate_rff
-            X_buf_raw = X_candidate.copy()
-            buf_y = self.buffer_y.copy()
-            prov = list(self.buffer_provenance)
-            w = w_full.copy()
-
-            while len(w) > self.buffer_capacity:
-                current_embedding = np.dot(w, X_buf_rff)
-                deltas = compute_removal_deltas(self.mean_rff_full_stream, current_embedding, X_buf_rff, w)
-                # choose smallest delta(s)
-                remove_k = min(remove_batch, len(w) - self.buffer_capacity)
+            # 3) One-shot removal: compute deltas once, remove all excess with smallest deltas, then one final reopt
+            current_embedding = np.dot(w_full, X_candidate_rff)
+            deltas = compute_removal_deltas(self.mean_rff_full_stream, current_embedding, X_candidate_rff, w_full)
+            remove_k = Nbuf - self.buffer_capacity
+            if remove_k > 0:
                 remove_idx = np.argsort(deltas)[:remove_k]
 
                 # Remove those indices
-                keep_mask = np.ones(len(w), dtype=bool)
+                keep_mask = np.ones(Nbuf, dtype=bool)
                 keep_mask[remove_idx] = False
-                X_buf_rff = X_buf_rff[keep_mask]
-                X_buf_raw = X_buf_raw[keep_mask]
-                buf_y = buf_y[keep_mask]
-                prov = [p for i, p in enumerate(prov) if keep_mask[i]]
-                w = w[keep_mask]
+                X_buf_rff = X_candidate_rff[keep_mask]
+                X_buf_raw = X_candidate[keep_mask]
+                buf_y = self.buffer_y[keep_mask]
+                prov = [p for i, p in enumerate(self.buffer_provenance) if keep_mask[i]]
+                w = w_full[keep_mask]
 
-                # renormalize quickly
+                # Quick renormalize (optional, since reopt next)
                 if w.sum() > 0:
                     w = w / (w.sum() + 1e-12)
                 else:
                     w = np.ones(len(w), dtype=float) / float(len(w))
 
-                # fully-corrective reopt: run MD (few iterations to stay fast in streaming)
+                # Final fully-corrective reopt on kept set
                 w, hist2 = mirror_descent_wrapper_for_stream(
                     X_buf_rff,
                     self.mean_rff_full_stream,
@@ -432,11 +441,11 @@ class MirrorDescentHerdingStreamer:
                 else:
                     w = np.ones_like(w) / float(len(w))
 
-            # update buffer to the pruned set
-            self.buffer_X = X_buf_raw
-            self.buffer_y = buf_y
-            self.buffer_provenance = prov
-            self.buffer_weights = w
+                # update buffer to the pruned set
+                self.buffer_X = X_buf_raw
+                self.buffer_y = buf_y
+                self.buffer_provenance = prov
+                self.buffer_weights = w
 
             if self.verbose:
                 print(f"After unherding prune: buffer size = {len(self.buffer_X)} (cap={self.buffer_capacity})")
@@ -449,7 +458,6 @@ class MirrorDescentHerdingStreamer:
         if len(self.buffer_X) > self.buffer_capacity:
             # reuse process by calling a dummy batch append of size 0 to trigger pruning
             # but simpler: just call process_batch with empty batch won't change mean; here we call the same removal loop:
-            # For brevity: we call process_batch with empty data (no-op)
             pass
 
         # Now produce final m-sized coreset using fully-corrective weighted kernel herding
@@ -511,32 +519,3 @@ class MirrorDescentHerdingStreamer:
             print(f"{flat_indices[i]:<15} {prov_str:<20} {weights[i]:<10.6f}")
         print(f"\nTotal points in coreset: {len(provenance)}")
         print(f"Total points seen in stream: {self.num_points_seen}")
-
-
-# -------------------------
-# Lightweight wrapper to call MD on precomputed RFFs
-# -------------------------
-def mirror_descent_wrapper_for_stream(
-    X_candidate_rff: np.ndarray,
-    mu_pi: np.ndarray,
-    md_iterations: int = 200,
-    eta: float = 0.1,
-    ridge: float = 1e-8,
-    initial_weights: Optional[np.ndarray] = None,
-    verbose: bool = False,
-) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """
-    Wrapper that runs mirror descent on candidate RFFs and returns full-length weights.
-    X_candidate_rff is already RFF-transformed.
-    """
-    w, hist = mirror_descent_weights_on_candidates_rff(
-        X_candidate_rff,
-        mu_pi,
-        md_iterations=md_iterations,
-        eta=eta,
-        ridge=ridge,
-        initial_weights=initial_weights,
-        tol=1e-6,
-        verbose=verbose,
-    )
-    return w, hist

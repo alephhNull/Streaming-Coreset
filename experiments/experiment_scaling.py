@@ -18,9 +18,9 @@ if __name__ == "__main__":
         "dataset": "cifar10",
         "embedding": 'resnet18',
         "embed_dim": None,
-        "benchmarks": ["MDH", "WKH", "Reservoir"],  # only these
-        "coreset_size": 200,   # will overwrite below
-        "dataset_subset_size": 2500,
+        "benchmarks": ["MDH", "WKH", "OnlineMMDPlus", "Reservoir"],  # only these
+        "coreset_size": 200,   # will overwrite be1low
+        "dataset_subset_size": 1000,
         "batch_size": 50,
         "n_rff_components": 1000,
         "kernel_gamma": 0.001,
@@ -43,14 +43,15 @@ if __name__ == "__main__":
         "md_eta": 10
     }
 
-    coreset_sizes = list(range(50, 501, 50))  # 50,100,...,500
+    coreset_sizes = list(range(50, 251, 50))  # 50,100,...,500
     benchmarks = base_config["benchmarks"]
 
     # labels for plots
     label_map = {
         "MDH": "Mirror Descent Herding",
         "WKH": "Weighted Kernel Herding",
-        "Reservoir": "Reservior sampling"  # spelling per your request
+        "Reservoir": "Reservoir sampling",  # spelling per your request
+        "OnlineMMDPlus": "Online MMD Plus"
     }
 
     # storage
@@ -92,7 +93,8 @@ if __name__ == "__main__":
     styles = {
         "MDH": ("-o", 7),
         "WKH": ("-s", 6),
-        "Reservoir": ("-^", 6)
+        "Reservoir": ("-^", 6),
+        "OnlineMMDPlus": ("-d", 6)
     }
 
     # avg_batch_time_ms plot
