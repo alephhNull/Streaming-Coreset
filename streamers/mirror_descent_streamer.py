@@ -287,9 +287,11 @@ def compute_removal_deltas(mu_pi: np.ndarray, current_embedding: np.ndarray, X_b
     return deltas
 
 
-# -------------------------
-# Main class: streaming with fully-corrective unherding
-# -------------------------
+import numpy as np
+from typing import Any, Dict, List, Optional, Tuple
+
+# (Assume mirror_descent_wrapper_for_stream and compute_removal_deltas are defined as in your code above)
+
 class MirrorDescentHerdingStreamer:
     def __init__(
         self,
@@ -301,6 +303,7 @@ class MirrorDescentHerdingStreamer:
         eta: float = 0.1,
         ridge: float = 1e-8,
         verbose: bool = False,
+        removal_batch_size: Optional[int] = None,  # NEW: control how many items to remove per reopt
     ) -> None:
         assert coreset_size <= buffer_capacity, "coreset_size must be <= buffer_capacity"
         self.coreset_size = coreset_size
@@ -311,6 +314,11 @@ class MirrorDescentHerdingStreamer:
         self.eta = eta
         self.ridge = ridge
         self.verbose = verbose
+
+        # NEW: how many items to remove per iterative re-opt step.
+        # If None -> default to remove all excess in one shot (old behavior).
+        # If k (int) -> remove k items per reopt iteration until buffer fits.
+        self.removal_batch_size = removal_batch_size
 
         # derived dims
         self.rff_dim = sampler.n_components
@@ -348,43 +356,37 @@ class MirrorDescentHerdingStreamer:
             self.mean_rff_full_stream = (1 - alpha) * self.mean_rff_full_stream + alpha * current_batch_mean
         self.num_points_seen += batch_len
 
-        # record previous buffer length (protected)
-        prev_len = len(self.buffer_X)
-
-        # append new batch to buffer arrays
+        # Append new batch to buffer arrays (and provenance)
         if self.buffer_X.size == 0:
             self.buffer_X = np.asarray(X_batch_np).copy()
         else:
             self.buffer_X = np.vstack([self.buffer_X, X_batch_np])
         self.buffer_y = np.concatenate([self.buffer_y, np.asarray(y_batch_np, dtype=int)])
+        self.buffer_provenance.extend([(batch_idx, i) for i in range(batch_len)])
 
         # update buffer weights: previous weights decay, new points get small mass
         if self.buffer_weights.size == 0:
+            # If buffer was empty, initialize new weights proportional to current running count
             new_weights = np.full(batch_len, 1.0 / float(self.num_points_seen))
             self.buffer_weights = new_weights
         else:
             alpha = float(batch_len) / float(self.num_points_seen)
-            self.buffer_weights *= (1 - alpha)
-            new_weights = np.full(batch_len, alpha / float(batch_len))
+            self.buffer_weights *= (1 - alpha)    # decay old mass
+            new_weights = np.full(batch_len, alpha / float(batch_len))  # equally distribute new mass
             self.buffer_weights = np.concatenate([self.buffer_weights, new_weights])
-
-        # provenance
-        self.buffer_provenance.extend([(batch_idx, i) for i in range(batch_len)])
 
         # check overflow
         if len(self.buffer_X) > self.buffer_capacity:
             if self.verbose:
                 print(f"Buffer overflow (size={len(self.buffer_X)} > cap={self.buffer_capacity}) - running fully-corrective unherding")
 
-            # 1) precompute RFFs for buffer once
+            # Precompute RFFs for buffer once
             X_candidate = self.buffer_X
             X_candidate_rff = self.sampler.transform(X_candidate)
             Nbuf = X_candidate_rff.shape[0]
 
-            # 2) run MD on entire buffer with warm start = current buffer_weights (full-length)
-            initial_weights_full = None
-            if self.buffer_weights.size == Nbuf:
-                initial_weights_full = self.buffer_weights.copy()
+            # Run MD on entire buffer with warm start = current buffer_weights (full-length)
+            initial_weights_full = self.buffer_weights.copy() if self.buffer_weights.size == Nbuf else None
             w_full, history = mirror_descent_wrapper_for_stream(
                 X_candidate_rff,
                 self.mean_rff_full_stream,
@@ -394,58 +396,98 @@ class MirrorDescentHerdingStreamer:
                 initial_weights=initial_weights_full,
                 verbose=self.verbose,
             )
-            # store last history for debug
             self.last_history = {"md_full_initial": history}
 
-            # ensure normalization
+            # Normalize
             if w_full.sum() > 0:
                 w_full = w_full / (w_full.sum() + 1e-12)
             else:
                 w_full = np.ones_like(w_full) / float(len(w_full))
 
-            # 3) One-shot removal: compute deltas once, remove all excess with smallest deltas, then one final reopt
-            current_embedding = np.dot(w_full, X_candidate_rff)
-            deltas = compute_removal_deltas(self.mean_rff_full_stream, current_embedding, X_candidate_rff, w_full)
-            remove_k = Nbuf - self.buffer_capacity
-            if remove_k > 0:
-                remove_idx = np.argsort(deltas)[:remove_k]
+            # Decide how many to remove in total and per mini-iteration
+            total_remove = int(Nbuf - self.buffer_capacity)
+            if total_remove <= 0:
+                # nothing to remove (shouldn't happen)
+                return
 
-                # Remove those indices
-                keep_mask = np.ones(Nbuf, dtype=bool)
+            # Determine mini-batch size (k) for iterative removals:
+            # - if user supplied removal_batch_size, use it
+            # - else default to total_remove (one-shot) to preserve current fast behavior
+            if self.removal_batch_size is None:
+                k = total_remove
+            else:
+                k = int(max(1, self.removal_batch_size))
+
+            # Initialize working arrays for iterative removal loop
+            X_buf_rff = X_candidate_rff.copy()
+            X_buf_raw = X_candidate.copy()
+            buf_y = self.buffer_y.copy()
+            prov = list(self.buffer_provenance)
+            w = w_full.copy()
+
+            removed_count = 0
+            # Loop until we've removed total_remove items
+            while removed_count < total_remove:
+                # compute current embedding and deltas on current kept set
+                current_embedding = np.dot(w, X_buf_rff)  # (D,)
+                deltas = compute_removal_deltas(self.mean_rff_full_stream, current_embedding, X_buf_rff, w)
+
+                # choose how many to remove this iteration
+                to_remove_now = min(k, total_remove - removed_count)
+                # pick indices of smallest deltas (they are indices into the current buffer)
+                remove_idx = np.argsort(deltas)[:to_remove_now]
+
+                if self.verbose:
+                    print(f"Removing {to_remove_now} items (indices {remove_idx}) out of {len(w)} candidates; removed so far {removed_count}")
+
+                # Remove chosen indices
+                keep_mask = np.ones(len(w), dtype=bool)
                 keep_mask[remove_idx] = False
-                X_buf_rff = X_candidate_rff[keep_mask]
-                X_buf_raw = X_candidate[keep_mask]
-                buf_y = self.buffer_y[keep_mask]
-                prov = [p for i, p in enumerate(self.buffer_provenance) if keep_mask[i]]
-                w = w_full[keep_mask]
 
-                # Quick renormalize (optional, since reopt next)
+                X_buf_rff = X_buf_rff[keep_mask]
+                X_buf_raw = X_buf_raw[keep_mask]
+                buf_y = buf_y[keep_mask]
+                prov = [p for i, p in enumerate(prov) if keep_mask[i]]
+                w = w[keep_mask]
+
+                removed_count += to_remove_now
+
+                # Quick renormalize (useful as warm-start for MD)
                 if w.sum() > 0:
                     w = w / (w.sum() + 1e-12)
                 else:
+                    # fallback uniform
                     w = np.ones(len(w), dtype=float) / float(len(w))
 
-                # Final fully-corrective reopt on kept set
+                # Re-run mirror-descent on the current retained set to be fully-corrective (use fewer iterations when streaming)
+                reopt_iters = max(30, int(self.md_iterations // 6))
                 w, hist2 = mirror_descent_wrapper_for_stream(
                     X_buf_rff,
                     self.mean_rff_full_stream,
-                    md_iterations=max(30, int(self.md_iterations // 6)),  # fewer iters in streaming reopt
+                    md_iterations=reopt_iters,
                     eta=self.eta,
                     ridge=self.ridge,
                     initial_weights=w,
                     verbose=self.verbose,
                 )
-                # normalize
+
+                # normalize again after MD
                 if w.sum() > 0:
                     w = w / (w.sum() + 1e-12)
                 else:
                     w = np.ones_like(w) / float(len(w))
 
-                # update buffer to the pruned set
-                self.buffer_X = X_buf_raw
-                self.buffer_y = buf_y
-                self.buffer_provenance = prov
-                self.buffer_weights = w
+                if self.verbose:
+                    # quick monitor of current MMD^2
+                    emb = np.dot(w, X_buf_rff)
+                    mmd_now = float(np.sum((self.mean_rff_full_stream - emb) ** 2))
+                    print(f"After removal loop step: retained {len(w)} points, MMD^2={mmd_now:.6g}")
+
+            # Update buffer with final kept set
+            self.buffer_X = X_buf_raw
+            self.buffer_y = buf_y
+            self.buffer_provenance = prov
+            self.buffer_weights = w
 
             if self.verbose:
                 print(f"After unherding prune: buffer size = {len(self.buffer_X)} (cap={self.buffer_capacity})")

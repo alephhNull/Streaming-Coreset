@@ -257,6 +257,7 @@ def run_mdh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff
         batch_size=train_loader.batch_size,
         md_iterations=md_iterations,
         eta=md_eta,
+        removal_batch_size=1,
         verbose=False
     )
 

@@ -43,7 +43,7 @@ if __name__ == "__main__":
         "md_eta": 10
     }
 
-    coreset_sizes = list(range(50, 251, 50))  # 50,100,...,500
+    coreset_sizes = list(range(50, 501, 50))  # 50,100,...,500
     benchmarks = base_config["benchmarks"]
 
     # labels for plots
