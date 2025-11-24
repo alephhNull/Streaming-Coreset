@@ -13,7 +13,7 @@ if __name__ == "__main__":
     "dataset": "adult",
     "embedding": None,
     "embed_dim": None,
-    "benchmarks": ["SuperSampling", "OnlineMMDPlus", "Reservoir"],  # only these
+    "benchmarks": ["AMH", "KH", "Reservoir"],  # only these
     "coreset_size": 30,
     "dataset_subset_size": 2500,
     "batch_size": 50,

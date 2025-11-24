@@ -15,16 +15,14 @@ if __name__ == "__main__":
 
     # base config (you provided)
     base_config = {
-        "dataset": "cifar10",
-        "embedding": 'resnet18',
+        "dataset": "adult",
+        "embedding": None,
         "embed_dim": None,
-        "benchmarks": ["MDH", "WKH", "OnlineMMDPlus", "Reservoir"],  # only these
-        "coreset_size": 200,   # will overwrite be1low
-        "dataset_subset_size": 1000,
+        "benchmarks": ["KH", "WKH"],  # only these
+        "dataset_subset_size": 2500,
         "batch_size": 50,
         "n_rff_components": 1000,
         "kernel_gamma": 0.001,
-        "buffer_capacity": 200,  # will overwrite below
         "random_seed": 1421380,
         "n_epochs_online": 20,
         "lr_online": 0.1,
@@ -43,15 +41,16 @@ if __name__ == "__main__":
         "md_eta": 10
     }
 
-    coreset_sizes = list(range(50, 501, 50))  # 50,100,...,500
+    coreset_sizes = list(range(50, 251, 50))  # 50,100,...,500
     benchmarks = base_config["benchmarks"]
 
     # labels for plots
     label_map = {
-        "MDH": "Mirror Descent Herding",
-        "WKH": "Weighted Kernel Herding",
+        "MDH": "Mirror Descent Unerding",
+        "WKH": "Weighted Kernel Herding (Fully Corrective FW)",
         "Reservoir": "Reservoir sampling",  # spelling per your request
-        "OnlineMMDPlus": "Online MMD Plus"
+        # "OnlineMMDPlus": "Online MMD Plus"
+        "KH": "Kernel Herding (Standard FW)"
     }
 
     # storage
@@ -94,7 +93,9 @@ if __name__ == "__main__":
         "MDH": ("-o", 7),
         "WKH": ("-s", 6),
         "Reservoir": ("-^", 6),
-        "OnlineMMDPlus": ("-d", 6)
+        # "OnlineMMDPlus": ("-d", 6)
+        "KH": ("-d", 6)
+
     }
 
     # avg_batch_time_ms plot

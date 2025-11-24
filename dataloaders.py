@@ -44,6 +44,8 @@ def load_dataset(dataset_name, subset_size, batch_size, seed, embedding, embed_d
         X_train, X_val, y_train, y_val = load_electricity_data(subset_size)
     elif dataset_name == 'cifar10':
         X_train, X_val, y_train, y_val = load_cifar10(subset_size, seed, embedding, embed_dim, device)
+    elif dataset_name == 'cifar100':
+        X_train, X_val, y_train, y_val = load_cifar100(subset_size, seed, embedding, embed_dim, device)
     elif dataset_name == 'mnist':
         X_train, X_val, y_train, y_val = load_mnist(subset_size, seed, embedding, embed_dim, device)
     elif dataset_name == 'fashion_mnist':
@@ -525,10 +527,68 @@ def load_mnist(subset_size, seed, embedding, embed_dim, device, cache_dir="featu
     return X_train, X_val, y_train, y_val
 
 
-def load_full_cifar():
+def load_full_cifar10():
     train_ds = datasets.CIFAR10(root='./data', train=True, download=True)
     test_ds = datasets.CIFAR10(root='./data', train=False, download=True)
     return ConcatDataset([train_ds, test_ds])
+
+
+def load_full_cifar100():
+    train_ds = datasets.CIFAR100(root='./data', train=True, download=True)
+    test_ds = datasets.CIFAR100(root='./data', train=False, download=True)
+    return ConcatDataset([train_ds, test_ds])
+
+
+def load_cifar100(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = generate_cache_key('cifar100', embedding)
+    cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
+
+    # === Load full features from cache or compute ===
+    if os.path.exists(cache_path):
+        print(f"Loading full cached features from {cache_path}")
+        data = joblib.load(cache_path)
+        X_full, y_full = data['X'], data['y']
+    else:
+        print("Extracting features for full CIFAR using pre-trained ResNet18...")
+        full_ds = load_full_cifar100()
+        resnet_transform = transforms.Compose([
+            transforms.Resize(224, InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+        dataset = TransformDataset(full_ds, resnet_transform)
+        X_full, y_full = extract_resnet18_features(dataset, device)
+        joblib.dump({'X': X_full, 'y': y_full}, cache_path)
+        print(f"Saved full features to cache: {cache_path}")
+
+    # === Subset and split ===
+    np.random.seed(seed)
+    indices = np.arange(len(X_full))
+    if subset_size and subset_size < len(indices):
+        indices = np.random.choice(indices, subset_size, replace=False)
+
+    X = X_full[indices]
+    y = y_full[indices]
+
+    # Split 80/20
+    n_train = int(0.8 * len(X))
+    perm = np.random.permutation(len(X))  # shuffle before split
+    train_idx, val_idx = perm[:n_train], perm[n_train:]
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val     = X[val_idx], y[val_idx]
+
+    # === Apply PCA if requested ===
+    if embed_dim is not None:
+        pca = PCA(n_components=embed_dim)
+        X_train = pca.fit_transform(X_train)
+        X_val   = pca.transform(X_val)
+        print(f"PCA applied. New feature dimension: {embed_dim}")
+    else:
+        print(f"No PCA. Original feature dimension: {X_train.shape[1]}")
+
+    print(f"Shapes — X_train: {X_train.shape}, X_val: {X_val.shape}")
+    return X_train, X_val, y_train, y_val
 
 
 def load_cifar10(subset_size, seed, embedding, embed_dim, device, cache_dir="feature_cache"):
@@ -543,7 +603,7 @@ def load_cifar10(subset_size, seed, embedding, embed_dim, device, cache_dir="fea
         X_full, y_full = data['X'], data['y']
     else:
         print("Extracting features for full CIFAR using pre-trained ResNet18...")
-        full_ds = load_full_cifar()
+        full_ds = load_full_cifar10()
         resnet_transform = transforms.Compose([
             transforms.Resize(224, InterpolationMode.BICUBIC),
             transforms.ToTensor(),

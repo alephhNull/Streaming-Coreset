@@ -17,6 +17,10 @@ from streamers.gss_streamer import GSSStreamer
 from streamers.ssd_streamer import SSDStreamer
 from streamers.rff_wkh_streamer import WKHStreamingCoreset
 from streamers.mirror_descent_streamer import MirrorDescentHerdingStreamer
+from streamers.kernel_herding_streamer import KernelHerdingStreamer
+from streamers.caratheodory_streamer import CaratheoderyStreamingCoreset
+from streamers.amh_streamer import AdaptiveKernelHerdingStreamer
+from streamers.awmh_streamer import AdaptiveWeightedHerdingStreamer
 
 from dataloaders import load_dataset
 from utils import calculate_mmd2_exact, calculate_wass_distance
@@ -266,6 +270,71 @@ def run_mdh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff
 
     return Xc, yc, w, metrics
 
+def run_kh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff, gamma, seed, arrival_interval_ms):
+    sampler=RBFSampler(gamma=gamma, n_components=n_rff, random_state=seed)
+    sampler.fit(X_train)
+
+    kh_streamer = KernelHerdingStreamer(
+        coreset_size=coreset_size,
+        buffer_capacity=buffer_capacity,
+        sampler=sampler,
+        batch_size=train_loader.batch_size
+    )
+
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(kh_streamer, train_loader, X_train, y_train, arrival_interval_ms)
+
+    return Xc, yc, w, metrics
+
+
+def run_caratheodory(train_loader, X_train, y_train, coreset_size, buffer_capacity, gamma, seed, arrival_interval_ms):
+    sampler=RBFSampler(gamma=gamma, n_components=coreset_size-1, random_state=seed)
+    sampler.fit(X_train)
+
+    cara_streamer = CaratheoderyStreamingCoreset(
+        coreset_size=coreset_size, 
+        buffer_capacity=buffer_capacity, 
+        rbf_sampler=sampler,
+        batch_size=train_loader.batch_size)
+
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(cara_streamer, train_loader, X_train, y_train, arrival_interval_ms)
+
+    return Xc, yc, w, metrics
+
+def run_amh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff, gamma, seed, arrival_interval_ms):
+    sampler=RBFSampler(gamma=gamma, n_components=n_rff, random_state=seed)
+    sampler.fit(X_train)
+
+    amh_streamer = AdaptiveKernelHerdingStreamer(
+        coreset_size=coreset_size,
+        buffer_capacity=buffer_capacity,
+        sampler=sampler,
+        batch_size=train_loader.batch_size
+    )
+
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(amh_streamer, train_loader, X_train, y_train, arrival_interval_ms)
+
+    return Xc, yc, w, metrics
+
+
+def run_awmh(train_loader, X_train, y_train, coreset_size, buffer_capacity, n_rff, gamma, seed, arrival_interval_ms):
+    sampler=RBFSampler(gamma=gamma, n_components=n_rff, random_state=seed)
+    sampler.fit(X_train)
+
+    awmh_streamer = AdaptiveWeightedHerdingStreamer(
+        coreset_size=coreset_size,
+        buffer_capacity=buffer_capacity,
+        sampler=sampler,
+        batch_size=train_loader.batch_size
+    )
+
+    # run_streaming_algorithm will handle the batch iteration and data accumulation
+    Xc, yc, w, metrics = run_streaming_algorithm(awmh_streamer, train_loader, X_train, y_train, arrival_interval_ms)
+
+    return Xc, yc, w, metrics
+
 def run_single_experiment(config):
     # Unpack config and parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -392,6 +461,34 @@ def run_single_experiment(config):
                     train_loader, X_train, y_train,
                     config['coreset_size'], config['buffer_capacity'],
                     config['n_rff_components'], config['kernel_gamma'],
+                    config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'KH':
+                Xc, yc, w, stream_meta = run_kh(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['n_rff_components'], config['kernel_gamma'],
+                    config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'AMH':
+                Xc, yc, w, stream_meta = run_amh(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['n_rff_components'], config['kernel_gamma'],
+                    config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'AWMH':
+                Xc, yc, w, stream_meta = run_awmh(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['n_rff_components'], config['kernel_gamma'],
+                    config['random_seed'] + t, config.get('arrival_interval')
+                )
+            elif bm == 'CARA':
+                Xc, yc, w, stream_meta = run_caratheodory(
+                    train_loader, X_train, y_train,
+                    config['coreset_size'], config['buffer_capacity'],
+                    config['kernel_gamma'],
                     config['random_seed'] + t, config.get('arrival_interval')
                 )
             elif bm == 'MDH':

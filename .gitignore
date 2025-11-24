@@ -6,3 +6,4 @@
 /streamers/__pycache__/
 /*.json
 /*.png
+/snapshots_mnist_stream
