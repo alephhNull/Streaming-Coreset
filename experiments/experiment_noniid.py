@@ -1,30 +1,5 @@
-"""
-Streaming Coreset Selection experiment on MNIST
-------------------------------------------------
-This script runs a streaming experiment designed to stress-test the
-MirrorDescentHerdingStreamer (the Streamer you provided) in a highly
-non-i.i.d. stream: the 2500-item stream is grouped by label (all 0s, then
-all 1s, ..., then all 9s). We record the Streamer's buffer contents after
-each batch and visualize snapshots so you can observe whether the buffer
-and final coreset remain balanced across classes.
-
-Assumptions:
-- You have defined the MirrorDescentHerdingStreamer class somewhere
-  importable as `from streamer import MirrorDescentHerdingStreamer` OR
-  you paste the class into the same file.
-- sklearn, torchvision, torch, numpy, matplotlib are available.
-
-Outputs:
-- Per-batch log of buffer label counts
-- Saved PNG snapshots showing current buffer images & labels at checkpoints
-- Final summary: class counts in final coreset and simple distances to uniform
-
-Run: python mnist_streaming_coreset_experiment.py
-"""
-
-import os
-import math
 import numpy as np
+import math
 import matplotlib.pyplot as plt
 from collections import Counter
 from typing import List
@@ -39,6 +14,9 @@ sys.path.insert(0, parent_dir)
 from streamers.mirror_descent_streamer import MirrorDescentHerdingStreamer
 from streamers.caratheodory_streamer import CaratheoderyStreamingCoreset
 from streamers.amh_streamer import AdaptiveKernelHerdingStreamer
+from streamers.rff_wkh_streamer import WKHStreamingCoreset
+from streamers.kernel_herding_streamer import KernelHerdingStreamer
+from dataloaders import load_dataset
 
 # Data loading (torchvision)
 try:
@@ -60,7 +38,7 @@ BATCH_SIZE = 50                    # number of images per streaming batch
 N_CLASSES = 10
 
 # Buffer / coreset settings (the user suggested M=16)
-M = 150                             # final coreset size and buffer capacity for this experiment
+M = 40                             # final coreset size and buffer capacity for this experiment
 BUFFER_CAPACITY = M
 CORESET_SIZE = M
 
@@ -79,6 +57,47 @@ os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
 
 # ----------------- Utility functions -----------------
+
+def sample_stratified_mnist_subset_embedded(num_per_class=NUM_PER_CLASS, seed=SEED):
+    # download if necessary
+    train_loader, val_loader, X_train, X_val, y_train, y_val = load_dataset('mnist', 50000, 50000, seed, embedding='resnet18', embed_dim=None, device='cpu')
+    # mnist = datasets.MNIST(root="./data", train=True, download=True, transform=transforms.ToTensor())
+    # X_all = mnist.data.numpy().reshape(-1, 28 * 28).astype(np.float32) / 255.0
+    # y_all = mnist.targets.numpy().astype(int)
+
+    X_all = X_train
+    y_all = y_train
+
+    idxs = []
+    rng = np.random.RandomState(seed)
+    per_class = {
+        0: NUM_PER_CLASS,
+        1: NUM_PER_CLASS * 2,
+        2: NUM_PER_CLASS,
+        3: NUM_PER_CLASS * 3,
+        4: NUM_PER_CLASS,
+        5: NUM_PER_CLASS * 5,
+        6: NUM_PER_CLASS,
+        7: NUM_PER_CLASS* 3,
+        8: NUM_PER_CLASS * 2,
+        9: NUM_PER_CLASS * 1,
+    }
+    for c in range(N_CLASSES):
+        class_idx = np.where(y_all == c)[0]
+        chosen = rng.choice(class_idx, size=per_class[c], replace=False)
+        idxs.append(chosen)
+
+    idxs = np.concatenate(idxs)
+    X = X_all[idxs]
+    y = y_all[idxs]
+
+    # order by label so stream is non-i.i.d.: all 0s, then all 1s, ...
+    order = np.argsort(y)
+    # order = np.random.choice(order, len(order), replace=False)
+    X = X[order]
+    y = y[order]
+    return X, y
+
 
 def sample_stratified_mnist_subset(num_per_class=NUM_PER_CLASS, seed=SEED):
     # download if necessary
@@ -154,7 +173,7 @@ def kl_divergence_to_uniform(counts: np.ndarray, eps=1e-12):
 
 def main():
     print("Preparing MNIST subset and batches...")
-    X, y = sample_stratified_mnist_subset(NUM_PER_CLASS, SEED)
+    X, y = sample_stratified_mnist_subset_embedded(NUM_PER_CLASS, SEED)
     batches = make_batches(X, y, BATCH_SIZE)
     print(f"Total items: {X.shape[0]}, total batches: {len(batches)}")
 
@@ -164,23 +183,23 @@ def main():
     sampler.fit(X)
 
     # Instantiate streamer
-    # streamer = MirrorDescentHerdingStreamer(
-    #     coreset_size=CORESET_SIZE,
-    #     buffer_capacity=BUFFER_CAPACITY,
-    #     sampler=sampler,
-    #     batch_size=BATCH_SIZE,
-    #     md_iterations=100,
-    #     eta=10,
-    #     verbose=False,
-    #     removal_batch_size=REMOVAL_BATCH_SIZE,
-    # )
-
-    streamer = AdaptiveKernelHerdingStreamer(
+    streamer = MirrorDescentHerdingStreamer(
         coreset_size=CORESET_SIZE,
         buffer_capacity=BUFFER_CAPACITY,
         sampler=sampler,
         batch_size=BATCH_SIZE,
+        md_iterations=100,
+        eta=10,
+        verbose=False,
+        removal_batch_size=REMOVAL_BATCH_SIZE,
     )
+
+    # streamer = AdaptiveKernelHerdingStreamer(
+    #     coreset_size=CORESET_SIZE,
+    #     buffer_capacity=BUFFER_CAPACITY,
+    #     sampler=sampler,
+    #     batch_size=BATCH_SIZE,
+    # )
 
     # keep snapshots and metrics
     snapshots = []
@@ -206,12 +225,12 @@ def main():
         # Print a compact status line
         print(f"Batch {bidx:02d} | buffer_size={len(buf_y):2d} | counts (per-class nonzero): {[(i,c) for i,c in enumerate(counts) if c>0]}")
 
-        # Save snapshot images periodically
-        if (bidx % SAVE_EVERY == 0) or (bidx in [batches_per_label - 1, mid_of_label1_idx]):
-            title = f"Batch {bidx} | buffer_size={len(buf_y)}"
-            fname = os.path.join(SNAPSHOT_DIR, f"snapshot_batch_{bidx:03d}.png")
-            visualize_buffer_images(buf_X, buf_y, prov, fname, title=title)
-            snapshots.append(fname)
+        # # Save snapshot images periodically
+        # if (bidx % SAVE_EVERY == 0) or (bidx in [batches_per_label - 1, mid_of_label1_idx]):
+        #     title = f"Batch {bidx} | buffer_size={len(buf_y)}"
+        #     fname = os.path.join(SNAPSHOT_DIR, f"snapshot_batch_{bidx:03d}.png")
+        #     visualize_buffer_images(buf_X, buf_y, prov, fname, title=title)
+        #     snapshots.append(fname)
 
         # Special check at midpoint of label-1 batches (user's diagnostic):
         if bidx == mid_of_label1_idx:
@@ -243,9 +262,9 @@ def main():
     print(f"L1 distance to uniform (0..1): {l1_distance_to_uniform(final_counts):.4f}")
     print(f"KL divergence to uniform: {kl_divergence_to_uniform(final_counts):.4f}")
 
-    # Save final visualization
-    visualize_buffer_images(streamer.buffer_X, streamer.buffer_y, streamer.buffer_provenance,
-                            os.path.join(SNAPSHOT_DIR, "final_coreset.png"), title="Final Coreset")
+    # # Save final visualization
+    # visualize_buffer_images(streamer.buffer_X, streamer.buffer_y, streamer.buffer_provenance,
+    #                         os.path.join(SNAPSHOT_DIR, "final_coreset.png"), title="Final Coreset")
 
     print(f"Snapshots saved to: {SNAPSHOT_DIR}")
     print("Experiment finished.")

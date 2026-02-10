@@ -47,8 +47,7 @@ def kernel_herding_rff(mu_pi: np.ndarray, X_candidate: np.ndarray, sampler: RBFS
 class KernelHerdingStreamer(AbstractStreamingCoreset):
     """
     Streaming coreset using unweighted RFF-based kernel herding.
-    - selects `coreset_size` points when buffer overflows
-    - returned weights are uniform (1 / coreset_size)
+    Also tracks labels (y) in the buffer and in the final coreset.
     """
 
     def __init__(self, coreset_size: int, buffer_capacity: int, sampler: RBFSampler, batch_size: int):
@@ -61,31 +60,31 @@ class KernelHerdingStreamer(AbstractStreamingCoreset):
 
         # dims
         self.rff_dim = sampler.n_components
-        # feature dimension of raw X
-        # RBFSampler stores random_weights_ of shape (n_features, n_components)
         self.feature_dim = sampler.random_weights_.shape[0]
 
         # buffer and provenance
         self.buffer_X = np.empty((0, self.feature_dim))
+        self.buffer_y = np.empty((0,), dtype=float)  # new: store labels
         self.buffer_provenance: List[Tuple[int, int]] = []
-        # weights over buffer points (kept uniform across the buffer)
+
+        # weights over buffer points (uniform)
         self.buffer_weights = np.empty(0, dtype=float)
 
-        # stream-level running mean in RFF space
+        # global streaming RFF mean
         self.mean_rff_full_stream = np.zeros(self.rff_dim)
         self.num_points_seen = 0
         self._finalized = False
 
     def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         if self._finalized:
-            print("Warning: Coreset has been finalized. Ignoring new batch.")
+            print("Warning: Coreset finalized; ignoring batch.")
             return
 
         batch_len = X_batch_np.shape[0]
         if batch_len == 0:
             return
 
-        # 1) update running mean embedding in RFF space
+        # --- Update streaming mean ---
         X_batch_rff = self.sampler.transform(X_batch_np)
         batch_mean = np.mean(X_batch_rff, axis=0)
 
@@ -97,32 +96,39 @@ class KernelHerdingStreamer(AbstractStreamingCoreset):
 
         self.num_points_seen += batch_len
 
-        # 2) buffer management
+        # --- Buffer management ---
         if len(self.buffer_X) + batch_len > self.buffer_capacity:
-            # overflow -> build candidate pool and reduce to coreset_size
-            X_candidate = np.vstack([self.buffer_X, X_batch_np]) if len(self.buffer_X) > 0 else X_batch_np.copy()
+            # Overflow: merge buffer + new batch
+            if len(self.buffer_X) > 0:
+                X_candidate = np.vstack([self.buffer_X, X_batch_np])
+                y_candidate = np.concatenate([self.buffer_y, y_batch_np])
+                prov_candidate = self.buffer_provenance + [(batch_idx, i) for i in range(batch_len)]
+            else:
+                X_candidate = X_batch_np.copy()
+                y_candidate = y_batch_np.copy()
+                prov_candidate = [(batch_idx, i) for i in range(batch_len)]
 
-            # provenance: existing buffer provenance first, then new batch provenance
-            new_prov = [(batch_idx, i) for i in range(batch_len)]
-            prov_candidate = self.buffer_provenance + new_prov
-
+            # Kernel herding selection
             selected_indices, final_weights = kernel_herding_rff(
                 mu_pi=self.mean_rff_full_stream,
                 X_candidate=X_candidate,
                 sampler=self.sampler,
-                m=self.coreset_size
+                m=self.coreset_size,
             )
 
-            # update buffer to selected coreset
+            # Update buffer to the selected coreset
             self.buffer_X = X_candidate[selected_indices]
+            self.buffer_y = y_candidate[selected_indices]            # <-- NEW
             self.buffer_provenance = [prov_candidate[i] for i in selected_indices]
             self.buffer_weights = final_weights
+
         else:
-            # no overflow -> just append batch and keep uniform weights across buffer
+            # No overflow: just append
             self.buffer_X = np.vstack([self.buffer_X, X_batch_np])
+            self.buffer_y = np.concatenate([self.buffer_y, y_batch_np])  # <-- NEW
             self.buffer_provenance.extend([(batch_idx, i) for i in range(batch_len)])
+
             n = len(self.buffer_X)
-            # reset to uniform weights summing to 1
             self.buffer_weights = np.full(n, 1.0 / n)
 
     def _finalize_coreset(self):
@@ -134,39 +140,50 @@ class KernelHerdingStreamer(AbstractStreamingCoreset):
                 mu_pi=self.mean_rff_full_stream,
                 X_candidate=self.buffer_X,
                 sampler=self.sampler,
-                m=self.coreset_size
+                m=self.coreset_size,
             )
             self.buffer_X = self.buffer_X[selected_indices]
+            self.buffer_y = self.buffer_y[selected_indices]              # <-- NEW
             self.buffer_provenance = [self.buffer_provenance[i] for i in selected_indices]
             self.buffer_weights = final_weights
         else:
-            # if buffer is already <= coreset_size, make weights uniform
             if len(self.buffer_X) > 0:
                 self.buffer_weights = np.full(len(self.buffer_X), 1.0 / len(self.buffer_X))
 
         self._finalized = True
 
-    def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
+    def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Tuple[int, int]]]:
+        """
+        Returns:
+            flat_indices: global indices
+            weights: coreset weights
+            y_values: labels of selected coreset
+            provenance: list of (batch_idx, local_idx)
+        """
         self._finalize_coreset()
 
         flat_indices = np.array(
             [p[0] * self.batch_size + p[1] for p in self.buffer_provenance],
-            dtype=int
+            dtype=int,
         )
-        weights = self.buffer_weights
-        return flat_indices, weights, self.buffer_provenance
+
+        return flat_indices, self.buffer_weights, self.buffer_provenance
 
     def print_coreset_provenance(self) -> None:
-        flat_indices, weights, provenance = self.get_final_coreset()
+        flat_indices, weights, y_values, provenance = self.get_final_coreset()
+
         print("--- Final Coreset Provenance (KernelHerdingStreamer) ---")
         if not provenance:
             print("Coreset is empty.")
             return
 
-        print(f"{'Global Index':<15} {'Provenance':<20} {'Weight':<10}")
-        print("-" * 45)
+        print(f"{'GlobalIdx':<10} {'(Batch,Idx)':<15} {'Weight':<10} {'Y':<10}")
+        print("-" * 50)
         for i in range(len(provenance)):
-            prov_str = f"(Batch {provenance[i][0]}, Idx {provenance[i][1]})"
-            print(f"{flat_indices[i]:<15} {prov_str:<20} {weights[i]:<10.6f}")
-        print(f"\nTotal points in coreset: {len(provenance)}")
-        print(f"Total points seen in stream: {self.num_points_seen}")
+            b, l = provenance[i]
+            print(
+                f"{flat_indices[i]:<10} (B{b},I{l}){'' :<5} {weights[i]:<10.6f} {y_values[i]:<10}"
+            )
+
+        print(f"\nTotal coreset points: {len(provenance)}")
+        print(f"Total points seen: {self.num_points_seen}")

@@ -82,6 +82,7 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
 
         # Buffers to hold current data and its origin
         self.buffer_X = np.empty((0, self.feature_dim))
+        self.buffer_y = np.empty(0, dtype=int)
         self.buffer_weights = np.empty(0, dtype=float)
         self.buffer_provenance: List[Tuple[int, int]] = []
 
@@ -117,7 +118,7 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
         if len(self.buffer_X) + batch_len > self.buffer_capacity:
             # Create a candidate pool from the buffer and the new batch
             X_candidate = np.vstack([self.buffer_X, X_batch_np])
-            
+            y_candidate = np.concatenate([self.buffer_y, y_batch_np])
             new_provenance = [(batch_idx, i) for i in range(batch_len)]
             provenance_candidate = self.buffer_provenance + new_provenance
 
@@ -131,6 +132,7 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
             
             # Update the buffer with the selected coreset points
             self.buffer_X = X_candidate[selected_indices]
+            self.buffer_y = y_candidate[selected_indices]
             self.buffer_provenance = [provenance_candidate[i] for i in selected_indices]
             self.buffer_weights = final_weights
         else:
@@ -141,6 +143,7 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
             self.buffer_weights = np.concatenate((self.buffer_weights, new_weights))
             
             self.buffer_X = np.vstack([self.buffer_X, X_batch_np])
+            self.buffer_y = np.concatenate([self.buffer_y, y_batch_np])
             self.buffer_provenance.extend([(batch_idx, i) for i in range(batch_len)])
 
     def _finalize_coreset(self):
@@ -157,6 +160,7 @@ class WKHStreamingCoreset(AbstractStreamingCoreset):
                 m=self.coreset_size
             )
             self.buffer_X = self.buffer_X[selected_indices]
+            self.buffer_y = self.buffer_y[selected_indices]
             self.buffer_provenance = [self.buffer_provenance[i] for i in selected_indices]
             self.buffer_weights = final_weights
         
