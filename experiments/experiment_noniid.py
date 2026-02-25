@@ -32,13 +32,13 @@ SEED = 0
 np.random.seed(SEED)
 random.seed(SEED)
 
-NUM_PER_CLASS = 250                # 250 * 10 = 2500 total
+NUM_PER_CLASS = 200                # 250 * 10 = 2500 total
 TOTAL = NUM_PER_CLASS * 10
 BATCH_SIZE = 50                    # number of images per streaming batch
 N_CLASSES = 10
 
 # Buffer / coreset settings (the user suggested M=16)
-M = 40                             # final coreset size and buffer capacity for this experiment
+M = 50                             # final coreset size and buffer capacity for this experiment
 BUFFER_CAPACITY = M
 CORESET_SIZE = M
 
@@ -70,18 +70,20 @@ def sample_stratified_mnist_subset_embedded(num_per_class=NUM_PER_CLASS, seed=SE
 
     idxs = []
     rng = np.random.RandomState(seed)
+    
     per_class = {
         0: NUM_PER_CLASS,
-        1: NUM_PER_CLASS * 2,
+        1: NUM_PER_CLASS,
         2: NUM_PER_CLASS,
-        3: NUM_PER_CLASS * 3,
+        3: NUM_PER_CLASS,
         4: NUM_PER_CLASS,
-        5: NUM_PER_CLASS * 5,
+        5: NUM_PER_CLASS,
         6: NUM_PER_CLASS,
-        7: NUM_PER_CLASS* 3,
-        8: NUM_PER_CLASS * 2,
-        9: NUM_PER_CLASS * 1,
+        7: NUM_PER_CLASS,
+        8: NUM_PER_CLASS ,
+        9: NUM_PER_CLASS,
     }
+
     for c in range(N_CLASSES):
         class_idx = np.where(y_all == c)[0]
         chosen = rng.choice(class_idx, size=per_class[c], replace=False)
@@ -264,7 +266,7 @@ def main():
 
     # # Save final visualization
     # visualize_buffer_images(streamer.buffer_X, streamer.buffer_y, streamer.buffer_provenance,
-    #                         os.path.join(SNAPSHOT_DIR, "final_coreset.png"), title="Final Coreset")
+    # os.path.join(SNAPSHOT_DIR, "final_coreset.png"), title="Final Coreset")
 
     print(f"Snapshots saved to: {SNAPSHOT_DIR}")
     print("Experiment finished.")

@@ -32,9 +32,9 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, parent_dir)
 
-from streamers.seperation_variant2 import (
-    SeparationGuardedFWStreamer,
-    TheoreticalHyperparamsSGPFW,
+from streamers.theoretical_rigourous_streamer import (
+    TheoreticalRigourousStreamer,
+    TheoreticalHyperparams,
 )
 
 from dataloaders import load_dataset
@@ -66,8 +66,9 @@ BATCH_SIZE = 1              # process point-by-point (theory is per-point)
 M = 50                      # buffer size
 RFF_DIM = 1024               # RFF dimension D
 RFF_GAMMA = 0.001           # kernel gamma for Gaussian RBF
-K_iter = 100
-NU_SEPERATION = 0.001
+K_iter = 1000
+lambda_reg = 0.01
+
 # Drift control: how quickly classes transition.
 # With sorted-class stream of N points per class, at the transition boundary
 # the running mean changes by roughly delta per step.  We set a TRANSITION_WIDTH
@@ -355,14 +356,25 @@ def main():
     # 4. Compute ALL hyperparameters deterministically
     # ------------------------------------------------------------------
     print("\n[4] Computing theoretical hyperparameters...")
-    hp = TheoreticalHyperparamsSGPFW(M=M, D=RFF_DIM, delta_max=delta_drift_safe, nu_separation=NU_SEPERATION, K_iter=K_iter)
+    hp = TheoreticalHyperparams(M=M, D=RFF_DIM, gamma=RFF_GAMMA,
+                                 delta_drift=delta_drift_safe, lambda_reg=lambda_reg, K_iter=K_iter)
     print(hp.summary())
 
     # ------------------------------------------------------------------
     # 5. Create streamer
     # ------------------------------------------------------------------
     print("\n[5] Creating TheoreticalRigourousStreamer...")
-    streamer = SeparationGuardedFWStreamer(M=M, D=RFF_DIM, delta_max=delta_drift_safe, nu_separation=NU_SEPERATION, sampler=sampler, batch_size=BATCH_SIZE, verbose=False)
+    streamer = TheoreticalRigourousStreamer(
+        M=M,
+        D=RFF_DIM,
+        gamma=RFF_GAMMA,
+        delta_drift=delta_drift_safe,
+        sampler=sampler,
+        batch_size=BATCH_SIZE,
+        verbose=False,
+        hyperparams=hp,
+    )
+
     # ------------------------------------------------------------------
     # 6. Run the stream
     # ------------------------------------------------------------------

@@ -32,9 +32,9 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, parent_dir)
 
-from streamers.seperation_variant2 import (
-    SeparationGuardedFWStreamer,
-    TheoreticalHyperparamsSGPFW,
+from streamers.pgd_streamer import (
+    FrankWolfeStreamer,
+    TheoreticalHyperparamsFW,
 )
 
 from dataloaders import load_dataset
@@ -66,8 +66,9 @@ BATCH_SIZE = 1              # process point-by-point (theory is per-point)
 M = 50                      # buffer size
 RFF_DIM = 1024               # RFF dimension D
 RFF_GAMMA = 0.001           # kernel gamma for Gaussian RBF
-K_iter = 100
-NU_SEPERATION = 0.001
+K_iter = 1000
+lambda_reg = 1e-2
+
 # Drift control: how quickly classes transition.
 # With sorted-class stream of N points per class, at the transition boundary
 # the running mean changes by roughly delta per step.  We set a TRANSITION_WIDTH
@@ -311,6 +312,49 @@ def plot_weight_distribution(weights, step, save_path):
     plt.close(fig)
 
 
+from sklearn.metrics.pairwise import rbf_kernel
+
+def compute_exact_rbf_mmd(X_stream: np.ndarray, buffer_X: list, buffer_weights: np.ndarray, gamma: float) -> float:
+    """
+    Computes the exact MMD between the full stream and the weighted coreset buffer
+    using the true Gaussian RBF kernel, avoiding any RFF approximation errors.
+    """
+    if len(buffer_X) == 0:
+        return float('inf')
+
+    Z = np.vstack(buffer_X)
+    w = np.array(buffer_weights)
+    w = w / np.sum(w)  # Ensure perfectly normalized weights
+
+    N = X_stream.shape[0]
+
+    # Term 1: Coreset-Coreset Density (w^T K_ZZ w)
+    K_ZZ = rbf_kernel(Z, Z, gamma=gamma)
+    term_ZZ = w.T @ K_ZZ @ w
+
+    # Term 2: Stream-Coreset Cross Covariance
+    # K_XZ shape: (N, M). We take the mean over the stream N.
+    K_XZ = rbf_kernel(X_stream, Z, gamma=gamma)
+    term_XZ = 2.0 * np.mean(K_XZ @ w)
+
+    # Term 3: Stream-Stream True Density
+    # Computed in chunks to prevent RAM blowup (e.g., if N > 10,000)
+    term_XX = 0.0
+    chunk_size = 2000
+    for i in range(0, N, chunk_size):
+        end_i = min(i + chunk_size, N)
+        K_XX_chunk = rbf_kernel(X_stream[i:end_i], X_stream, gamma=gamma)
+        term_XX += np.sum(K_XX_chunk)
+    term_XX /= (N * N)
+
+    # Exact MMD^2 = E[k(x,x)] - 2E[k(x,z)] + E[k(z,z)]
+    mmd_sq = term_XX - term_XZ + term_ZZ
+    
+    # Clip at 0 to avoid float precision negatives
+    return float(np.sqrt(max(0.0, mmd_sq)))
+
+
+
 # ========================================================================
 #  MAIN EXPERIMENT
 # ========================================================================
@@ -355,14 +399,15 @@ def main():
     # 4. Compute ALL hyperparameters deterministically
     # ------------------------------------------------------------------
     print("\n[4] Computing theoretical hyperparameters...")
-    hp = TheoreticalHyperparamsSGPFW(M=M, D=RFF_DIM, delta_max=delta_drift_safe, nu_separation=NU_SEPERATION, K_iter=K_iter)
+    hp = TheoreticalHyperparamsFW(M=M, D=RFF_DIM, K_iter=K_iter)
     print(hp.summary())
 
     # ------------------------------------------------------------------
     # 5. Create streamer
     # ------------------------------------------------------------------
     print("\n[5] Creating TheoreticalRigourousStreamer...")
-    streamer = SeparationGuardedFWStreamer(M=M, D=RFF_DIM, delta_max=delta_drift_safe, nu_separation=NU_SEPERATION, sampler=sampler, batch_size=BATCH_SIZE, verbose=False)
+    streamer = FrankWolfeStreamer(M=M, D=RFF_DIM, sampler=sampler, batch_size=BATCH_SIZE, verbose=False)
+
     # ------------------------------------------------------------------
     # 6. Run the stream
     # ------------------------------------------------------------------
@@ -462,6 +507,23 @@ def main():
         if violation_indices:
             print(f"     First violation at step {violation_indices[0]}")
             print(f"     Last violation at step {violation_indices[-1]}")
+
+    # ------------------------------------------------------------------
+    # 7b. Exact Kernel Validation (The True Ground Truth)
+    # ------------------------------------------------------------------
+    print("\n [7b] Computing exact RBF Kernel MMD (Validation)...")
+    exact_mmd = compute_exact_rbf_mmd(X, streamer.buffer_X, streamer.buffer_weights, RFF_GAMMA)
+    
+    print(f"  Exact Kernel MMD:               {exact_mmd:.6f}")
+    
+    # Compare against the theoretical RFF approximation error (1/sqrt(D))
+    rff_floor = hp.eps_rff
+    print(f"  RFF Approximation Floor:        {rff_floor:.6f}")
+    
+    if exact_mmd < rff_floor:
+        print(f"  >> OUTSTANDING: The exact MMD is lower than the theoretical RFF noise floor!")
+    else:
+        print(f"  >> VALIDATED: The exact MMD is bounded tightly by the RFF approximation.")
 
     # diag = streamer.get_diagnostics()
     # print(f"\n  Stream statistics:")
