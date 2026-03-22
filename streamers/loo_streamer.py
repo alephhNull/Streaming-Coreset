@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Optional, List, Tuple, Dict, Any
+from scipy.optimize import minimize
 from streamers.abstract_streamer import AbstractStreamingCoreset
 
 # ==============================================================================
@@ -48,7 +49,7 @@ class OrthogonalSampler:
 # 2. THE STREAMER
 # ==============================================================================
 
-class StreamingCoreset(AbstractStreamingCoreset):
+class LOOStreamer(AbstractStreamingCoreset):
     def __init__(
         self,
         M: int,
@@ -79,6 +80,31 @@ class StreamingCoreset(AbstractStreamingCoreset):
         self._finalized = False
         self.mmd_history: List[float] = []
 
+    def _solve_qp(self, Z: np.ndarray, mean_rff: np.ndarray) -> np.ndarray:
+        """
+        Solves the QP to find optimal simplex weights for the given set of features Z.
+        Minimizes || Z^T w - mean_rff ||^2 subject to w >= 0, sum(w) = 1.
+        """
+        n = Z.shape[0]
+        K = Z @ Z.T
+        l = Z @ mean_rff
+        
+        # Objective: 0.5 * w^T K w - l^T w
+        def obj(w):
+            return 0.5 * w.T @ K @ w - l.T @ w
+            
+        def jac(w):
+            return K @ w - l
+            
+        cons = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0})
+        bounds = [(0.0, 1.0) for _ in range(n)]
+        
+        # Uniform initialization
+        w0 = np.ones(n) / n
+        
+        res = minimize(obj, w0, method='SLSQP', jac=jac, bounds=bounds, constraints=cons)
+        return res.x
+
     def _process_point(self, x_raw, y_label, z_rff, batch_idx, local_idx):
         self.t += 1
         alpha = 1.0 / self.t
@@ -96,9 +122,8 @@ class StreamingCoreset(AbstractStreamingCoreset):
             self.buffer_Z = z_rff[np.newaxis, :]
             self.buffer_weights = np.array([1.0])
 
-        # PFW Optimization
-        if len(self.buffer_Z) > 1:
-            # Re-calculating K_mat locally ensures we respect current buffer state
+        # Standard PFW Optimization (runs while buffer is filling up)
+        if 1 < len(self.buffer_Z) <= self.M:
             K_mat = self.buffer_Z @ self.buffer_Z.T
             linear_term = self.buffer_Z @ self.mean_rff
             
@@ -121,16 +146,38 @@ class StreamingCoreset(AbstractStreamingCoreset):
                 self.buffer_weights[idx_s] += gamma
                 self.buffer_weights[idx_v] -= gamma
 
-        # Eviction
+        # LOO Eviction and QP Re-optimization
         if len(self.buffer_Z) > self.M:
-            evict = np.argmin(self.buffer_weights)
-            self.buffer_Z = np.delete(self.buffer_Z, evict, axis=0)
-            self.buffer_weights = np.delete(self.buffer_weights, evict)
-            del self.buffer_X[evict]; del self.buffer_y[evict]; del self.buffer_provenance[evict]
+            best_error = float('inf')
+            best_evict_idx = -1
+            best_weights = None
             
-            s = np.sum(self.buffer_weights)
-            if s > 1e-9: self.buffer_weights /= s
-        
+            # Iterate through all M+1 points to find the best one to drop
+            for i in range(len(self.buffer_Z)):
+                # Temporarily fix weight w_i = 0 by removing point i
+                Z_loo = np.delete(self.buffer_Z, i, axis=0)
+                
+                # Solve QP for the remaining M points
+                w_opt = self._solve_qp(Z_loo, self.mean_rff)
+                
+                # Calculate exact MMD for this LOO configuration
+                current_mmd = np.linalg.norm(self.mean_rff - (Z_loo.T @ w_opt))
+                
+                # Track the configuration with the lowest error
+                if current_mmd < best_error:
+                    best_error = current_mmd
+                    best_evict_idx = i
+                    best_weights = w_opt
+            
+            # Permanently execute the eviction that gave the lowest error
+            self.buffer_Z = np.delete(self.buffer_Z, best_evict_idx, axis=0)
+            self.buffer_weights = best_weights  # These already sum to 1 from the QP
+            
+            # Clean up tracking lists
+            del self.buffer_X[best_evict_idx]
+            del self.buffer_y[best_evict_idx]
+            del self.buffer_provenance[best_evict_idx]
+
         self.mmd_history.append(self.get_current_mmd())
 
     def process_batch(self, X_batch, y_batch, batch_idx):

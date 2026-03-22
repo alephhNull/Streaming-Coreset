@@ -1,5 +1,5 @@
 """
-Rigorous Theory Experiment: Separation-Guarded Online Coreset on Non-IID MNIST.
+Rigorous Theory Experiment: Streaming Coreset on Non-IID MNIST.
 
 This experiment:
   1. Builds a non-stationary MNIST stream with controlled drift
@@ -33,10 +33,11 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, parent_dir)
 
 from streamers.orf_streamer import (
-    SeparationGuardedFrankWolfeStreamer,
-    TheoreticalHyperparamsFW,
+    StreamingCoreset,
     OrthogonalSampler,
 )
+from streamers.reservoirstreamer import ReservoirSamplerBatchStreamer
+from streamers.loo_streamer import LOOStreamer
 
 from dataloaders import load_dataset
 
@@ -68,7 +69,6 @@ M = 50                      # buffer size
 RFF_DIM = 1024               # RFF dimension D
 RFF_GAMMA = 0.001           # kernel gamma for Gaussian RBF
 K_iter = 1000
-NU_SEPERATION = 0.0
 # Drift control: how quickly classes transition.
 # With sorted-class stream of N points per class, at the transition boundary
 # the running mean changes by roughly delta per step.  We set a TRANSITION_WIDTH
@@ -103,7 +103,7 @@ def sample_stratified_mnist_subset_embedded(num_per_class=NUM_PER_CLASS, seed=SE
         5: NUM_PER_CLASS * 5,
         6: NUM_PER_CLASS * 4,
         7: NUM_PER_CLASS * 3,
-        8: NUM_PER_CLASS *2,
+        8: NUM_PER_CLASS * 2,
         9: NUM_PER_CLASS,
     }
 
@@ -116,7 +116,11 @@ def sample_stratified_mnist_subset_embedded(num_per_class=NUM_PER_CLASS, seed=SE
     X = X_all[idxs]
     y = y_all[idxs]
 
-    return X, y
+    # Steps (1-based) where digit changes: cumulative sum of per_class, excluding total
+    counts = np.array([per_class[c] for c in range(N_CLASSES)])
+    class_change_steps = np.cumsum(counts)[:-1].tolist()
+
+    return X, y, class_change_steps
 
 # ========================================================================
 #  DATA PREPARATION
@@ -181,16 +185,20 @@ def class_balance_stats(labels: np.ndarray, n_classes: int = N_CLASSES):
     return np.array([c.get(i, 0) for i in range(n_classes)], dtype=int)
 
 
-def plot_mmd_trajectory(mmd_history, eps_bound, save_path):
-    """Plot MMD over time vs theoretical bound."""
+def plot_mmd_trajectory(mmd_history, reservoir_mmd_history, save_path, class_change_steps=None):
+    """Plot MMD over time: StreamingCoreset vs Reservoir.
+    If class_change_steps is provided, draw vertical lines at those steps (digit changes)."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 5))
     steps = np.arange(1, len(mmd_history) + 1)
-    ax.plot(steps, mmd_history, linewidth=0.7, color='steelblue', label='Observed MMD')
-    ax.axhline(y=eps_bound, color='red', linestyle='--', linewidth=2,
-               label=f'Theoretical bound eps={eps_bound:.4f}')
+    ax.plot(steps, mmd_history, linewidth=0.7, color='steelblue', label='StreamingCoreset MMD')
+    ax.plot(steps, reservoir_mmd_history, linewidth=0.7, color='coral', label='Reservoir MMD')
+    if class_change_steps is not None:
+        for t in class_change_steps:
+            if 1 <= t <= len(mmd_history):
+                ax.axvline(x=t, color='gray', linestyle='--', linewidth=0.8, alpha=0.7)
     ax.set_xlabel('Stream step t')
     ax.set_ylabel('MMD (L2 in RFF space)')
-    ax.set_title('MMD Trajectory vs Theoretical Guarantee')
+    ax.set_title('MMD Trajectory: StreamingCoreset vs Reservoir')
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -234,8 +242,11 @@ def plot_buffer_class_evolution(class_history, n_classes, save_path):
 
 def plot_stream_vs_buffer_distribution(stream_dist_history, buffer_dist_history,
                                        n_classes, save_path):
-    """Compare stream cumulative distribution vs buffer distribution at checkpoints."""
+    """Compare stream cumulative distribution vs buffer distribution at checkpoints.
+    Expects histories to already contain only evenly spaced steps (t = 0, Total/max_subplots, ...)."""
     n_checkpoints = len(stream_dist_history)
+    if n_checkpoints == 0:
+        return
     n_cols = min(5, n_checkpoints)
     n_rows = max(1, math.ceil(n_checkpoints / n_cols))
 
@@ -358,16 +369,16 @@ def plot_weight_distribution(weights, step, save_path):
 # ========================================================================
 def main():
     print("=" * 70)
-    print("  RIGOROUS THEORY EXPERIMENT: Separation-Guarded Coreset on MNIST")
+    print("  RIGOROUS THEORY EXPERIMENT: Streaming Coreset on MNIST")
     print("=" * 70)
 
     # ------------------------------------------------------------------
     # 1. Load data
     # ------------------------------------------------------------------
     print("\n[1] Loading MNIST and preparing non-IID stream...")
-    X, y = sample_stratified_mnist_subset_embedded(NUM_PER_CLASS)
+    X, y, class_change_steps = sample_stratified_mnist_subset_embedded(NUM_PER_CLASS)
     print(f"    Total points: {X.shape[0]}, Feature dim: {X.shape[1]}")
-    print(f"    Class order: {np.unique(y[::NUM_PER_CLASS])}")
+    print(f"    Class order: 0..9 (Gaussian-like per-class counts)")
     print(f"    Stream is sorted by class (non-IID)")
 
     # ------------------------------------------------------------------
@@ -393,22 +404,24 @@ def main():
     plot_drift_profile(drift_values, os.path.join(SNAPSHOT_DIR, "drift_profile.png"))
 
     # ------------------------------------------------------------------
-    # 4. Compute ALL hyperparameters deterministically
+    # 4. Create streamer
     # ------------------------------------------------------------------
-    print("\n[4] Computing theoretical hyperparameters...")
-    hp = TheoreticalHyperparamsFW(M=M, D=RFF_DIM, delta_drift_max=delta_drift_safe, nu_separation=NU_SEPERATION, K_iter=K_iter, t_final=TOTAL)
-    print(hp.summary())
+    print("\n[4] Creating StreamingCoreset...")
+    streamer = StreamingCoreset(
+        M=M,
+        D=RFF_DIM,
+        delta_drift_max=delta_drift_safe,
+        sampler=sampler,
+        batch_size=BATCH_SIZE,
+        K_iter=K_iter,
+        verbose=False,
+    )
+    reservoir = ReservoirSamplerBatchStreamer(coreset_size=M, batch_size=BATCH_SIZE, random_seed=SEED)
 
     # ------------------------------------------------------------------
-    # 5. Create streamer
+    # 5. Run the stream
     # ------------------------------------------------------------------
-    print("\n[5] Creating TheoreticalRigourousStreamer...")
-    streamer = SeparationGuardedFrankWolfeStreamer(M=M, D=RFF_DIM, delta_drift_max=delta_drift_safe, nu_separation=NU_SEPERATION, sampler=sampler, batch_size=BATCH_SIZE, verbose=False)
-
-    # ------------------------------------------------------------------
-    # 6. Run the stream
-    # ------------------------------------------------------------------
-    print("\n[6] Processing stream...")
+    print("\n[5] Processing stream...")
     n_total = X.shape[0]
 
     # Tracking for visualization
@@ -416,8 +429,14 @@ def main():
     stream_dist_history = []
     buffer_dist_history = []
     snapshot_steps = set()
+    # For stream vs buffer plot: exactly max_subplots steps at t = 0, Total/max_subplots, 2*Total/max_subplots, ...
+    STREAM_VS_BUFFER_SUBPLOTS = 12
+    stream_vs_buffer_steps = set(
+        round(i * (n_total - 1) / (STREAM_VS_BUFFER_SUBPLOTS - 1))
+        for i in range(STREAM_VS_BUFFER_SUBPLOTS)
+    ) if STREAM_VS_BUFFER_SUBPLOTS > 1 else {0}
 
-    # Checkpoints: at class transitions and regular intervals
+    # Checkpoints: at class transitions and regular intervals (for other diagnostics)
     for c in range(N_CLASSES):
         # At end of each class block
         snapshot_steps.add(min((c + 1) * NUM_PER_CLASS - 1, n_total - 1))
@@ -429,8 +448,12 @@ def main():
 
     stream_labels_so_far = []
     mmd_at_steps = []
+    reservoir_mmd_history = []
 
     print_interval = max(1, n_total // 20)  # print ~20 status lines
+
+    # RFF approximation floor (1/sqrt(D)) for reference in plots
+    eps_rff = 1.0 / np.sqrt(RFF_DIM)
 
     for t in range(n_total):
         x_t = X[t:t + 1]
@@ -438,13 +461,25 @@ def main():
         stream_labels_so_far.append(int(y[t]))
 
         streamer.process_batch(x_t, y_t, batch_idx=t)
+        reservoir.process_batch(x_t, y_t, batch_idx=t)
+
+        # Reservoir MMD in same RFF space: ||stream mean - reservoir mean||
+        if len(reservoir.reservoir_indices) == 0:
+            mmd_res = 1.0
+        else:
+            X_res = X[reservoir.reservoir_indices]
+            Z_res = sampler.transform(X_res)
+            w_res = np.ones(len(Z_res)) / len(Z_res)
+            mean_res = Z_res.T @ w_res
+            mmd_res = float(np.linalg.norm(streamer.mean_rff - mean_res))
+        reservoir_mmd_history.append(mmd_res)
 
         # Record buffer class composition
         buf_counts = class_balance_stats(streamer.buffer_y, N_CLASSES)
         class_composition_history.append(buf_counts.copy())
 
-        # At checkpoints, record distributions
-        if t in snapshot_steps:
+        # At checkpoints, record distributions (for stream vs buffer plot: only at evenly spaced steps)
+        if t in stream_vs_buffer_steps:
             # Stream distribution up to t
             stream_counts = class_balance_stats(
                 np.array(stream_labels_so_far), N_CLASSES
@@ -470,11 +505,11 @@ def main():
             n_buf = len(streamer.buffer_y)
             dominant_classes = [(i, c) for i, c in enumerate(buf_counts) if c > 0]
             print(f"  t={t:5d}/{n_total} | buf={n_buf:3d} | "
-                  f"MMD={current_mmd:.6f} | eps={hp.eps_total:.6f} | "
+                  f"MMD={current_mmd:.6f} | RFF_floor={eps_rff:.6f} | "
                   f"classes={dominant_classes}")
 
     # ------------------------------------------------------------------
-    # 7. Analysis and results
+    # 6. Analysis and results
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
     print("  RESULTS AND ANALYSIS")
@@ -484,40 +519,23 @@ def main():
     max_mmd = max(mmd_history) if mmd_history else 0
     mean_mmd = np.mean(mmd_history) if mmd_history else 0
     final_mmd = mmd_history[-1] if mmd_history else 0
-    eps = hp.eps_total
+    eps_rff = 1.0 / np.sqrt(RFF_DIM)
 
-    print(f"\n  Theoretical epsilon bound:      {eps:.6f}")
+    print(f"\n  RFF approximation floor (1/sqrt(D)): {eps_rff:.6f}")
     print(f"  Max observed MMD (all steps):   {max_mmd:.6f}")
     print(f"  Mean observed MMD:              {mean_mmd:.6f}")
-    print(f"  Final observed MMD:             {final_mmd:.6f}")
-    print(f"  Max MMD / eps bound:            {max_mmd / max(eps, 1e-15):.4f}")
+    print(f"  Final observed MMD:              {final_mmd:.6f}")
 
-    if max_mmd <= eps:
-        print(f"\n  >> GUARANTEE SATISFIED: max MMD ({max_mmd:.6f}) <= eps ({eps:.6f})")
-    else:
-        violation_count = sum(1 for m in mmd_history if m > eps)
-        print(f"\n  >> GUARANTEE VIOLATED at {violation_count}/{len(mmd_history)} steps")
-        print(f"     (max MMD {max_mmd:.6f} > eps {eps:.6f})")
-        print(f"     Ratio: {max_mmd / eps:.4f}x the bound")
-        # Find when violations occur
-        violation_indices = [i for i, m in enumerate(mmd_history) if m > eps]
-        if violation_indices:
-            print(f"     First violation at step {violation_indices[0]}")
-            print(f"     Last violation at step {violation_indices[-1]}")
-    
     # ------------------------------------------------------------------
-    # 7b. Exact Kernel Validation (The True Ground Truth)
+    # 6b. Exact Kernel Validation (The True Ground Truth)
     # ------------------------------------------------------------------
-    print("\n [7b] Computing exact RBF Kernel MMD (Validation)...")
+    print("\n [6b] Computing exact RBF Kernel MMD (Validation)...")
     exact_mmd = compute_exact_rbf_mmd(X, streamer.buffer_X, streamer.buffer_weights, RFF_GAMMA)
     
     print(f"  Exact Kernel MMD:               {exact_mmd:.6f}")
+    print(f"  RFF Approximation Floor:         {eps_rff:.6f}")
     
-    # Compare against the theoretical RFF approximation error (1/sqrt(D))
-    rff_floor = hp.eps_rff
-    print(f"  RFF Approximation Floor:        {rff_floor:.6f}")
-    
-    if exact_mmd < rff_floor:
+    if exact_mmd < eps_rff:
         print(f"  >> OUTSTANDING: The exact MMD is lower than the theoretical RFF noise floor!")
     else:
         print(f"  >> VALIDATED: The exact MMD is bounded tightly by the RFF approximation.")
@@ -556,14 +574,15 @@ def main():
     print(f"    # nonzero:   {np.sum(w > 1e-8)}/{len(w)}")
 
     # ------------------------------------------------------------------
-    # 8. Plots
+    # 7. Plots
     # ------------------------------------------------------------------
-    print(f"\n[8] Generating visualization plots...")
+    print(f"\n[7] Generating visualization plots...")
 
-    # a) MMD trajectory
+    # a) MMD trajectory: our algorithm vs reservoir (vertical lines at digit changes)
     plot_mmd_trajectory(
-        mmd_history, eps,
-        os.path.join(SNAPSHOT_DIR, "mmd_trajectory.png")
+        mmd_history, reservoir_mmd_history,
+        os.path.join(SNAPSHOT_DIR, "mmd_trajectory.png"),
+        class_change_steps=class_change_steps,
     )
 
     # b) Buffer class composition over time
@@ -584,15 +603,15 @@ def main():
         os.path.join(SNAPSHOT_DIR, "final_weight_distribution.png")
     )
 
-    # e) MMD trajectory zoomed to last 20% of stream (steady state region)
+    # e) MMD trajectory zoomed to last 20% of stream (steady state region): streamer vs reservoir
     if len(mmd_history) > 100:
         start_idx = int(0.8 * len(mmd_history))
         fig, ax = plt.subplots(1, 1, figsize=(10, 4))
         steps_zoom = np.arange(start_idx, len(mmd_history))
         ax.plot(steps_zoom, mmd_history[start_idx:], linewidth=0.8,
-                color='steelblue', label='Observed MMD')
-        ax.axhline(y=eps, color='red', linestyle='--', linewidth=2,
-                    label=f'eps={eps:.4f}')
+                color='steelblue', label='StreamingCoreset MMD')
+        ax.plot(steps_zoom, reservoir_mmd_history[start_idx:], linewidth=0.8,
+                color='coral', label='Reservoir MMD')
         ax.set_xlabel('Stream step t')
         ax.set_ylabel('MMD')
         ax.set_title('MMD Trajectory (Steady State Region, last 20%)')

@@ -3,7 +3,7 @@ from typing import Optional, List, Tuple, Dict, Any
 from streamers.abstract_streamer import AbstractStreamingCoreset
 
 # ==============================================================================
-# 1. THE ORTHOGONAL SAMPLER (Ensuring Theory Meets Practice)
+# 1. THE ORTHOGONAL SAMPLER
 # ==============================================================================
 
 class OrthogonalSampler:
@@ -12,43 +12,27 @@ class OrthogonalSampler:
         self.n_components = n_components
         self.gamma = gamma
         
-        # 1. We need n_components features. 
-        # Since each orthogonal block is size d_in x d_in, we stack blocks.
         nb_blocks = int(np.ceil(n_components / d_in))
         W_blocks = []
         
         for _ in range(nb_blocks):
-            # Generate a random Gaussian matrix
             G = np.random.randn(d_in, d_in)
-            # Compute QR to get an orthogonal matrix Q
             Q, _ = np.linalg.qr(G)
             W_blocks.append(Q)
             
-        # 2. Stack and truncate to exactly n_components
-        # W_ortho shape will be (n_components, d_in)
         W_ortho = np.vstack(W_blocks)[:n_components, :]
-        
-        # 3. Scale by sqrt(2*gamma) to approximate the RBF kernel correctly
-        # This ensures the spectral frequencies match the Gaussian distribution
         self.W = W_ortho * np.sqrt(2 * gamma)
-        
-        # 4. Bias term must match n_components (D)
         self.b = np.random.uniform(0, 2 * np.pi, n_components)
 
     def transform(self, X: np.ndarray) -> np.ndarray:
-        # X: (N, d_in)
-        # self.W.T: (d_in, D)
-        # Result: (N, D)
         projection = X @ self.W.T + self.b
-        
-        # Apply the cosine activation
         return np.sqrt(2.0 / self.n_components) * np.cos(projection)
 
 # ==============================================================================
-# 2. THE STREAMER
+# 2. THE FAST PROXY LOO STREAMER
 # ==============================================================================
 
-class StreamingCoreset(AbstractStreamingCoreset):
+class ProxyLOOStreamer(AbstractStreamingCoreset):
     def __init__(
         self,
         M: int,
@@ -98,7 +82,6 @@ class StreamingCoreset(AbstractStreamingCoreset):
 
         # PFW Optimization
         if len(self.buffer_Z) > 1:
-            # Re-calculating K_mat locally ensures we respect current buffer state
             K_mat = self.buffer_Z @ self.buffer_Z.T
             linear_term = self.buffer_Z @ self.mean_rff
             
@@ -121,13 +104,43 @@ class StreamingCoreset(AbstractStreamingCoreset):
                 self.buffer_weights[idx_s] += gamma
                 self.buffer_weights[idx_v] -= gamma
 
-        # Eviction
+        # ======================================================================
+        # INFLUENCE FUNCTION EVICTION (KKT Proxy)
+        # ======================================================================
         if len(self.buffer_Z) > self.M:
-            evict = np.argmin(self.buffer_weights)
+            n = len(self.buffer_Z)
+            
+            # 1. Re-use or rebuild K_mat with a tiny ridge for numerical stability
+            K_mat = self.buffer_Z @ self.buffer_Z.T
+            K_ridge = K_mat + 1e-6 * np.eye(n)
+            
+            # 2. Build the KKT Block Matrix
+            H = np.zeros((n + 1, n + 1))
+            H[:n, :n] = K_ridge
+            H[:n, n] = 1.0
+            H[n, :n] = 1.0
+            
+            # 3. Invert the KKT Matrix
+            try:
+                H_inv = np.linalg.inv(H)
+            except np.linalg.LinAlgError:
+                H_inv = np.linalg.pinv(H)
+                
+            # 4. Calculate approximate LOO drop scores safely
+            # We take the absolute value of the diagonal to prevent numerical inversion artifacts
+            diag_inv = np.abs(np.diag(H_inv[:n, :n]))
+            
+            # Add a small epsilon to denominator to prevent division by zero
+            drop_scores = (self.buffer_weights ** 2) / (diag_inv + 1e-12)
+            
+            # 5. Evict the point that causes the smallest theoretical error spike
+            evict = np.argmin(drop_scores)
+            
             self.buffer_Z = np.delete(self.buffer_Z, evict, axis=0)
             self.buffer_weights = np.delete(self.buffer_weights, evict)
             del self.buffer_X[evict]; del self.buffer_y[evict]; del self.buffer_provenance[evict]
             
+            # 6. Renormalize (Provides a perfectly stable warm-start for PFW on the next loop)
             s = np.sum(self.buffer_weights)
             if s > 1e-9: self.buffer_weights /= s
         
