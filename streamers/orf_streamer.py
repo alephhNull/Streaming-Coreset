@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.stats import chi
 from typing import Optional, List, Tuple, Dict, Any
 from streamers.abstract_streamer import AbstractStreamingCoreset
 
