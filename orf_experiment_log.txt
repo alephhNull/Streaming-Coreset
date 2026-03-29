@@ -1,0 +1,103 @@
+======================================================================
+  WARM-START vs COLD-START COMPARISON: Streaming Coreset on MNIST
+======================================================================
+
+[1] Loading MNIST and preparing non-IID stream...
+Loading dataset: mnist
+Loading cached features from feature_cache\c5277b4ba07b9aec8dd72e507038edb5.pkl
+Shapes — X_train: (40000, 512), X_val: (10000, 512)
+    Total points: 7000, Feature dim: 512
+    Stream is sorted by class (non-IID)
+
+[2] Fitting RBFSampler (RFF)...
+    ORF dim D=1024, gamma=0.001
+
+[3] Estimating drift bound from data...
+    Max empirical drift: 0.270864
+    Safe drift bound (1.1x): 0.297950
+  Saved drift profile plot: snapshots_warmstart_comparison\drift_profile.png
+
+[4] Creating streamers (cold-start, warm-start, reservoir)...
+
+[5] Processing stream...
+  t=    0/7000 | cold MMD=0.000000 | warm MMD=0.000000 | RFF_floor=0.031250
+  t=  350/7000 | cold MMD=0.014542 | warm MMD=0.014596 | RFF_floor=0.031250
+  t=  700/7000 | cold MMD=0.011519 | warm MMD=0.011489 | RFF_floor=0.031250
+  t= 1050/7000 | cold MMD=0.014247 | warm MMD=0.014150 | RFF_floor=0.031250
+  t= 1400/7000 | cold MMD=0.014824 | warm MMD=0.015083 | RFF_floor=0.031250
+  t= 1750/7000 | cold MMD=0.015427 | warm MMD=0.015449 | RFF_floor=0.031250
+  t= 2100/7000 | cold MMD=0.015118 | warm MMD=0.014920 | RFF_floor=0.031250
+  t= 2450/7000 | cold MMD=0.015129 | warm MMD=0.014794 | RFF_floor=0.031250
+  t= 2800/7000 | cold MMD=0.015589 | warm MMD=0.014787 | RFF_floor=0.031250
+  t= 3150/7000 | cold MMD=0.015750 | warm MMD=0.014592 | RFF_floor=0.031250
+  t= 3500/7000 | cold MMD=0.015902 | warm MMD=0.014314 | RFF_floor=0.031250
+  t= 3850/7000 | cold MMD=0.015506 | warm MMD=0.014735 | RFF_floor=0.031250
+  t= 4200/7000 | cold MMD=0.015545 | warm MMD=0.014998 | RFF_floor=0.031250
+  t= 4550/7000 | cold MMD=0.016360 | warm MMD=0.015505 | RFF_floor=0.031250
+  t= 4900/7000 | cold MMD=0.016196 | warm MMD=0.015599 | RFF_floor=0.031250
+  t= 5250/7000 | cold MMD=0.015899 | warm MMD=0.016017 | RFF_floor=0.031250
+  t= 5600/7000 | cold MMD=0.015991 | warm MMD=0.015668 | RFF_floor=0.031250
+  t= 5950/7000 | cold MMD=0.015938 | warm MMD=0.015682 | RFF_floor=0.031250
+  t= 6300/7000 | cold MMD=0.016300 | warm MMD=0.015948 | RFF_floor=0.031250
+  t= 6650/7000 | cold MMD=0.015745 | warm MMD=0.016196 | RFF_floor=0.031250
+  t= 6999/7000 | cold MMD=0.016123 | warm MMD=0.016070 | RFF_floor=0.031250
+
+======================================================================
+  WARM-START vs COLD-START COMPARISON
+======================================================================
+
+  RFF approximation floor (1/sqrt(D)): 0.031250
+
+  [Cold-start]
+    Max MMD:   0.017106
+    Mean MMD:  0.015214
+    Final MMD: 0.016123
+    Transient (steps to 2×final MMD): 0
+
+  [Warm-start]
+    Max MMD:   0.017312
+    Mean MMD:  0.014860
+    Final MMD: 0.016070
+    Transient (steps to 2×final MMD): 0
+
+  [Reservoir]
+    Max MMD:   0.105431
+    Mean MMD:  0.074333
+    Final MMD: 0.062614
+    Transient (steps to 2×final MMD): 0
+
+[6b] Computing exact RBF kernel MMD for both streamers...
+  Exact MMD — Cold-start: 0.019204
+  Exact MMD — Warm-start: 0.019640
+  RFF floor:              0.031250
+  >> Lower exact MMD: cold-start  (delta = 0.000435)
+
+  Final buffer class distribution (cold | warm | stream):
+    Class 0: cold=  6.0%  warm=  4.0%  stream=  3.6%
+    Class 1: cold=  8.0%  warm=  4.0%  stream=  7.1%
+    Class 2: cold= 14.0%  warm= 12.0%  stream= 10.7%
+    Class 3: cold= 12.0%  warm= 12.0%  stream= 10.7%
+    Class 4: cold= 10.0%  warm= 16.0%  stream= 14.3%
+    Class 5: cold= 14.0%  warm= 16.0%  stream= 17.9%
+    Class 6: cold= 14.0%  warm= 16.0%  stream= 14.3%
+    Class 7: cold= 10.0%  warm=  8.0%  stream= 10.7%
+    Class 8: cold=  8.0%  warm=  6.0%  stream=  7.1%
+    Class 9: cold=  4.0%  warm=  6.0%  stream=  3.6%
+
+  Final weight statistics:
+  [Cold-start]  min=0.013105  max=0.033073  mean=0.020000  std=0.005044  nonzero=50/50
+  [Warm-start]  min=0.010884  max=0.031751  mean=0.020000  std=0.004576  nonzero=50/50
+
+[7] Generating plots...
+  Saved MMD trajectory plot: snapshots_warmstart_comparison\mmd_trajectory.png
+  Saved warm-start comparison plot: snapshots_warmstart_comparison\warmstart_comparison.png
+  Saved buffer composition plot: snapshots_warmstart_comparison\buffer_composition_cold.png
+  Saved buffer composition plot: snapshots_warmstart_comparison\buffer_composition_warm.png
+  Saved distribution comparison plot: snapshots_warmstart_comparison\stream_vs_buffer_dist.png
+  Saved steady-state MMD plot
+
+  All plots saved to: snapshots_warmstart_comparison/
+
+======================================================================
+  EXPERIMENT COMPLETE
+======================================================================

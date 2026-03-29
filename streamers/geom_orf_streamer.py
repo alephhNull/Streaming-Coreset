@@ -6,6 +6,9 @@ from streamers.abstract_streamer import AbstractStreamingCoreset
 # 1. THE ORTHOGONAL SAMPLER (Ensuring Theory Meets Practice)
 # ==============================================================================
 
+import numpy as np
+from scipy.stats import chi
+
 class OrthogonalSampler:
     def __init__(self, d_in: int, n_components: int, gamma: float):
         self.d_in = d_in
@@ -114,13 +117,31 @@ class StreamingCoreset(AbstractStreamingCoreset):
 
         # Eviction
         if len(self.buffer_Z) > self.M:
-            evict = np.argmin(self.buffer_weights)
+            # 1. Compute pairwise distance matrix
+            from scipy.spatial.distance import cdist
+            dists = cdist(self.buffer_Z, self.buffer_Z)
+            np.fill_diagonal(dists, np.inf)
+            
+            # 2. Find distance to nearest neighbor for each atom
+            min_dists = np.min(dists, axis=1)
+            
+            # 3. Geometric penalty: weight * distance_to_nearest_neighbor
+            penalty = self.buffer_weights * min_dists
+            evict = np.argmin(penalty)
+            nearest_idx = np.argmin(dists[evict])
+            evict_weight = self.buffer_weights[evict] # Capture mass FIRST
+
+            # 2. Adjust target index for the upcoming deletion shift
+            if nearest_idx > evict:
+                nearest_idx -= 1
+
+            # 3. Delete from arrays and lists
             self.buffer_Z = np.delete(self.buffer_Z, evict, axis=0)
             self.buffer_weights = np.delete(self.buffer_weights, evict)
             del self.buffer_X[evict]; del self.buffer_y[evict]; del self.buffer_provenance[evict]
-            
-            s = np.sum(self.buffer_weights)
-            if s > 1e-9: self.buffer_weights /= s
+
+            # 4. Transfer mass correctly
+            self.buffer_weights[nearest_idx] += evict_weight
         
         self.mmd_history.append(self.get_current_mmd())
 
