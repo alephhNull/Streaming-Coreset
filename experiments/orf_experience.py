@@ -68,7 +68,7 @@ BATCH_SIZE = 1              # process point-by-point (theory is per-point)
 M = 50                      # buffer size
 RFF_DIM = 1024               # RFF dimension D
 RFF_GAMMA = 0.001           # kernel gamma for Gaussian RBF
-K_iter = 1000
+K_iter = 10
 # Drift control: how quickly classes transition.
 # With sorted-class stream of N points per class, at the transition boundary
 # the running mean changes by roughly delta per step.  We set a TRANSITION_WIDTH
