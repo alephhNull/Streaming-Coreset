@@ -130,8 +130,10 @@ plt.annotate('', xy=(0.80, 0.04), xytext=(0.10, 0.04),
              arrowprops=dict(arrowstyle="-|>", color="black", lw=1.5, mutation_scale=15))
 fig.text(0.45, 0.05, "Time", ha='center', va='bottom', fontsize=11, fontweight='bold', color='black')
 
-# Vertical Legend on the right (Geometric Span moved to the top)
+# Vertical Legend on the right
 legend_el = [
+    # Coreset Points added to the very top
+    mlines.Line2D([0], [0], marker='o', color='w', markerfacecolor='black', markeredgecolor='white', markersize=8, label='Coreset Points'),
     patches.Patch(facecolor='black', alpha=0.1, label='Geometric Span'),
     mlines.Line2D([0], [0], marker='o', color='w', markerfacecolor='tab:red', markersize=8, label='Concept A'),
     mlines.Line2D([0], [0], marker='o', color='w', markerfacecolor='tab:blue', markersize=8, label='Concept B'),

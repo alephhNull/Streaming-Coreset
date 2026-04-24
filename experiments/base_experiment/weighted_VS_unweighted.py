@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Union, Any, Tuple
@@ -233,57 +232,6 @@ def plot_exact_mmd_multi(
     plt.close(fig)
 
 
-def plot_stream_vs_buffer_distribution(stream_dist_history, buffer_dist_history,
-                                       n_classes, save_path):
-    """Compare stream cumulative distribution vs buffer distribution at checkpoints.
-    Expects histories to already contain exactly 9 evenly spaced steps (t = 0, ..., Total)."""
-    n_checkpoints = len(stream_dist_history)
-    if n_checkpoints == 0:
-        return
-    
-    # Force a 3x3 layout
-    n_rows, n_cols = 3, 3
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.5 * n_rows))
-    axes = np.array(axes).reshape(-1)
-
-    x = np.arange(n_classes)
-    width = 0.35
-
-    for idx in range(len(axes)):
-        ax = axes[idx]
-        if idx < n_checkpoints:
-            s_dist = stream_dist_history[idx]
-            b_dist = buffer_dist_history[idx]
-            step_label = s_dist['step']
-
-            s_vals = s_dist['dist']
-            b_vals = b_dist['dist']
-
-            ax.bar(x - width / 2, s_vals, width, label='Stream (Normalized)', alpha=0.7, color='steelblue')
-            ax.bar(x + width / 2, b_vals, width, label='Buffer (Weighted)', alpha=0.7, color='coral')
-            ax.set_title(f't={step_label}', fontsize=9)
-            ax.set_xticks(x)
-            ax.set_xticklabels(x, fontsize=7)
-            
-            # Dynamically adjust y-limits to fit the distributions perfectly 
-            # while providing some visual headroom
-            max_y = max(np.max(s_vals), np.max(b_vals)) if len(s_vals) > 0 else 1.0
-            ax.set_ylim(0, max_y * 1.15)
-            
-            if idx == 0:
-                ax.legend(fontsize=7)
-        else:
-            # Turn off axes for empty subplots if stream_length < 9
-            ax.axis('off')
-
-    fig.suptitle('Stream vs Buffer Class Distribution at Checkpoints', fontsize=12)
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved distribution comparison plot: {save_path}")
-
-
 def run_base_experiment(
     cfg: BaseExperimentConfig,
     stream: StratifiedStream,
@@ -319,16 +267,9 @@ def run_base_experiment(
     exact_hist: Dict[str, List[float]] = {name: [] for name in names}
     chk_steps: List[int] = []
 
-    # Distribution History tracking setup - updated to strictly 9 points
-    n_dist_subplots = min(9, n_total) 
-    dist_checkpoints = set(int(v) for v in np.linspace(0, n_total - 1, n_dist_subplots))
-    stream_dist_history = []
-    buffer_dist_history = {name: [] for name in names}
-
     for t in range(n_total):
         for name in names:
             streamers[name].process_batch(X[t : t + 1], y[t : t + 1], batch_idx=t)
-            
         record_exact = want_exact and (t % cfg.exact_mmd_stride == 0 or t == n_total - 1)
         if record_exact:
             X_prefix = X[: t + 1]
@@ -340,28 +281,6 @@ def run_base_experiment(
                     )
                 )
             chk_steps.append(t)
-
-        # Track distributions at evenly spaced 9 checkpoints
-        if t in dist_checkpoints:
-            # Stream handles unweighted samples, normalized to sum to 1.0
-            s_counts = np.bincount(y[: t + 1].astype(int).flatten(), minlength=stream.n_classes)
-            s_dist = s_counts / s_counts.sum() if s_counts.sum() > 0 else np.zeros_like(s_counts, dtype=float)
-            stream_dist_history.append({"step": t + 1, "dist": s_dist})
-            
-            for name in names:
-                st = streamers[name]
-                b_counts = np.zeros(stream.n_classes, dtype=np.float64)
-                
-                # Buffer accurately factors in `buffer_weights` (bw) per class
-                if hasattr(st, "buffer_y") and len(st.buffer_y) > 0:
-                    b_y = np.array(st.buffer_y).astype(int).flatten()
-                    b_w = np.array(st.buffer_weights, dtype=np.float64).flatten()
-                    for by, bw in zip(b_y, b_w):
-                        if 0 <= by < stream.n_classes:
-                            b_counts[by] += bw
-                            
-                b_dist = b_counts / b_counts.sum() if b_counts.sum() > 0 else b_counts
-                buffer_dist_history[name].append({"step": t + 1, "dist": b_dist})
 
     for name in names:
         l2_hist[name] = list(streamers[name].mmd_history)
@@ -390,17 +309,6 @@ def run_base_experiment(
             stride=cfg.exact_mmd_stride,
         )
         print(f"  Saved: {stem}_exact_rbf_mmd.png")
-
-    # Plot the Stream vs Buffer Distributions in a 3x3 grid
-    for name in names:
-        key = _sanitize_key(name)
-        dist_save_path = stem + f"_{key}_dist_comparison.png"
-        plot_stream_vs_buffer_distribution(
-            stream_dist_history,
-            buffer_dist_history[name],
-            stream.n_classes,
-            dist_save_path
-        )
 
     save_dict: Dict[str, Any] = {
         "gamma": cfg.rbf_gamma,
@@ -437,22 +345,34 @@ def run_base_experiment(
 def main() -> None:
     from sklearn.kernel_approximation import RBFSampler
 
-    # ws = [1, 2, 3, 4, 5, 5, 4, 3, 2, 1]
-    ws = [5, 4, 3, 2, 1, 1, 2, 3, 4, 5]
-    logits = {i: float(ws[i]) for i in range(len(ws))}
+    # THE ADVERSARIAL STREAM:
+    # Alternating massive distributions and micro-anomalies.
+    # Forces extreme quantization errors on the unweighted baseline.
+    explicit_blocks = [
+        (0, 100), # Block 1: Massive flood of Class 0 (Dominant)
+        (1, 2),   # Block 2: Micro-cluster of Class 1 (~1.9% mass)
+        (2, 100), # Block 3: Massive flood of Class 2
+        (3, 2),   # Block 4: Micro-cluster of Class 3 (~1.9% mass)
+        (4, 100), # Block 5: Massive flood of Class 4
+    ]
+
     cfg = BaseExperimentConfig(
-        dataset_name="cifar10",
-        label_logits=logits,
-        stream_length=1000,
+        dataset_name="mnist", # MNIST has tighter geometric clusters, making MMD failure obvious
+        stream_blocks=explicit_blocks,
+        stream_length=2000,
         num_splits=1,
         metrics=MetricsMode.BOTH,
-        rbf_gamma=0.00095,
+        rbf_gamma=0.0001,       # Slightly higher gamma to make the RKHS more sensitive to local geometry
+        exact_mmd_stride=10,  # High resolution to catch the exact moment of failure
         seed=42,
-        output_dir=os.path.join(_PROJECT_ROOT, "dist_comparison2"),
+        output_dir=os.path.join(_PROJECT_ROOT, "stress_test_unweighted"),
     )
     stream = load_stratified_stream(cfg)
 
-    M, D = 50, 1024
+    # CRITICAL: Extreme budget constraint (M=10)
+    # This restricts the unweighted buffer's flexibility, forcing it into bad decisions.
+    M, D = 10, 1024
+    
     np.random.seed(cfg.seed)
     sampler_rff = RBFSampler(gamma=cfg.rbf_gamma, n_components=D, random_state=cfg.seed + 12345)
     
@@ -461,7 +381,9 @@ def main() -> None:
 
     streamers = {
         # Bumped K_iter to 200 to ensure the Weighted method finds the optimal continuous distribution
-        "Weighted RFF (Proposed)": StreamingCoreset(M, D, sampler_rff, batch_size=1, K_iter=1000),
+        "Weighted RFF (Proposed)": StreamingCoreset(M, D, sampler_rff, batch_size=1, K_iter=200),
+        "Unweighted RFF (Naive)": UnweightedStreamingCoreset(M, D, sampler_rff, batch_size=1),
+        # "Reservoir Sampling": ReservoirRFFBaseline(M, D, sampler_rff, batch_size=1),
     }
     run_base_experiment(cfg, stream, streamers)
 

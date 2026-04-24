@@ -27,6 +27,29 @@ def logits_to_per_class_counts(
     return {c: int(counts[c]) for c in range(n_classes)}
 
 
+def blocks_to_counts(
+    stream_blocks: List[Tuple[int, float]], stream_length: int
+) -> List[Tuple[int, int]]:
+    """Converts a sequence of (class_idx, relative_weight) blocks to exact counts summing to stream_length."""
+    if not stream_blocks:
+        return []
+    
+    w = np.array([float(b[1]) for b in stream_blocks], dtype=np.float64)
+    if np.sum(w) <= 0:
+        w[:] = 1.0
+    w = w / np.sum(w)
+    raw = stream_length * w
+    counts = np.floor(raw).astype(np.int64)
+    deficit = int(stream_length - int(np.sum(counts)))
+    rem = raw - counts.astype(np.float64)
+    for _ in range(deficit):
+        j = int(np.argmax(rem))
+        counts[j] += 1
+        rem[j] -= 1.0
+    
+    return [(stream_blocks[i][0], int(counts[i])) for i in range(len(stream_blocks))]
+
+
 def class_block_starts(per_class: Dict[int, int], n_classes: int) -> np.ndarray:
     starts = np.zeros(n_classes, dtype=np.int64)
     acc = 0
@@ -66,6 +89,65 @@ def label_transition_steps_1based(y: np.ndarray) -> List[int]:
         if y[t] != y[t - 1]:
             out.append(t + 1)
     return out
+
+
+def manual_sample_stream(
+    X_all: np.ndarray,
+    y_all: np.ndarray,
+    explicit_counts: List[Tuple[int, int]],
+    n_classes: int,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray, Optional[List[int]], Dict[int, int]]:
+    """Builds a stream explicitly following the block sequence without reusing data points."""
+    rng = np.random.RandomState(seed)
+    
+    # Shuffle available indices per class
+    available_idxs = {}
+    for c in range(n_classes):
+        idx_c = np.where(y_all == c)[0]
+        rng.shuffle(idx_c)
+        available_idxs[c] = idx_c
+        
+    used_counters = {c: 0 for c in range(n_classes)}
+    per_class_used = {c: 0 for c in range(n_classes)}
+    
+    X_list = []
+    y_list = []
+    class_change_steps = []
+    current_step = 0
+    
+    for c, count in explicit_counts:
+        if count <= 0:
+            continue
+        start = used_counters[c]
+        end = start + count
+        
+        if end > len(available_idxs[c]):
+            raise ValueError(
+                f"Not enough points for class {c}: need {end}, have {len(available_idxs[c])}"
+            )
+            
+        idxs = available_idxs[c][start:end]
+        X_list.append(X_all[idxs])
+        y_list.append(y_all[idxs])
+        
+        used_counters[c] = end
+        per_class_used[c] += count
+        
+        current_step += count
+        class_change_steps.append(current_step)
+        
+    # The last block boundary coincides with stream completion, so drop it from transition lines
+    if class_change_steps:
+        class_change_steps.pop()
+        
+    if not X_list:
+        return np.array([]), np.array([]), [], per_class_used
+        
+    X = np.concatenate(X_list)
+    y = np.concatenate(y_list)
+    
+    return X, y, class_change_steps, per_class_used
 
 
 def stratified_sample_stream(

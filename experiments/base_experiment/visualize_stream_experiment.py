@@ -95,11 +95,13 @@ def get_indices_from_streamer(streamer):
     # Fallback to provenance tuples: p[0] is batch_idx (timestep)
     return [p[0] for p in streamer.buffer_provenance]
 
-def plot_stream_experiment(y_stream, images_stream, res_indices, our_indices, M, filename="stream_visualization.png"):
+def plot_stream_experiment(y_stream, images_stream, res_indices, our_indices, M, filename="stream_visualization.pdf"):
     """Generates the requested 3-row layout."""
-    fig = plt.figure(figsize=(20, 8))
-    # Assign vertical ratios: Stream row takes less vertical space, image rows take more
-    gs = gridspec.GridSpec(3, 1, height_ratios=[1.5, 2.5, 2.5], hspace=0.4)
+    # Decreased height to 5 (from 8) to compress the overall vertical space
+    fig = plt.figure(figsize=(20, 5)) 
+    
+    # Decreased hspace to 0.1 (from 0.4) to reduce space between rows
+    gs = gridspec.GridSpec(3, 1, height_ratios=[1.5, 2.5, 2.5], hspace=0.2)
     cmap = plt.get_cmap('tab10')
 
     # ==========================
@@ -173,7 +175,8 @@ def plot_stream_experiment(y_stream, images_stream, res_indices, our_indices, M,
             ax_img.text(-0.15, 0.5, "Our Method", transform=ax_img.transAxes,
                         ha='right', va='center', fontsize=12, fontweight='bold')
 
-    plt.savefig(filename, bbox_inches='tight', dpi=200)
+    # Ensure format="pdf" is passed to guarantee the vector format output
+    plt.savefig(filename, bbox_inches='tight', format="pdf", dpi=300)
     print(f"[plot] Saved visualization to: {filename}")
     plt.close(fig)
 
@@ -215,7 +218,8 @@ def main():
     res_indices = sorted(get_indices_from_streamer(streamers["reservoir"]))
 
     print("[plot] Generating requested layout...")
-    plot_path = os.path.join(cfg.output_dir, "coreset_stream_decomposition.png")
+    # Updated output name to .pdf
+    plot_path = os.path.join(cfg.output_dir, "coreset_stream_decomposition.pdf")
     plot_stream_experiment(y_stream, images_stream, res_indices, our_indices, M, filename=plot_path)
 
 if __name__ == "__main__":
