@@ -11,7 +11,7 @@ if _PROJECT_ROOT not in sys.path:
 from streamers.abstract_streamer import AbstractStreamingCoreset
 
 
-class InfluenceStreamingCoreset(AbstractStreamingCoreset):
+class StreamingCoreset(AbstractStreamingCoreset):
     def __init__(
         self,
         M: int,

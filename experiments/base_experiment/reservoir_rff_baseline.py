@@ -28,7 +28,8 @@ class ReservoirRFFBaseline:
         self._rng = np.random.RandomState(seed)
 
         self.buffer_X: List[np.ndarray] = []
-        self.buffer_provenance: List[Tuple[int, int]] = []  # Added to track indices
+        self.buffer_y: List[int] = []
+        self.buffer_provenance: List[Tuple[int, int]] = []
         self.t = 0
         self.mean_rff = np.zeros(self.rff_dim, dtype=np.float64)
         self.mmd_history: List[float] = []
@@ -51,12 +52,14 @@ class ReservoirRFFBaseline:
 
             if len(self.buffer_X) < self.M:
                 self.buffer_X.append(np.asarray(x, dtype=np.float64).copy())
-                self.buffer_provenance.append((batch_idx, i))  # Track added item
+                self.buffer_y.append(int(y_batch[i]))
+                self.buffer_provenance.append((batch_idx, i))
             else:
                 j = int(self._rng.randint(0, self.t))
                 if j < self.M:
                     self.buffer_X[j] = np.asarray(x, dtype=np.float64).copy()
-                    self.buffer_provenance[j] = (batch_idx, i)  # Track replaced item
+                    self.buffer_y[j] = int(y_batch[i])
+                    self.buffer_provenance[j] = (batch_idx, i)
 
             if len(self.buffer_X) == 0:
                 self.mmd_history.append(1.0)

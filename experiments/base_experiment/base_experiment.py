@@ -35,6 +35,7 @@ from stream_builders import (
 from streaming_coreset import StreamingCoreset
 from unweighted_coreset import UnweightedStreamingCoreset
 from reservoir_rff_baseline import ReservoirRFFBaseline
+from bilevel_streamer import BilevelStreamingCoreset
 
 DEFAULT_EXACT_MMD_MAX_STREAM = 2000
 
@@ -303,8 +304,8 @@ def run_base_experiment(
     n_trans = count_label_transitions(y)
 
     any_st = next(iter(streamers.values()))
-    M = any_st.M
-    D = any_st.rff_dim
+    M = getattr(any_st, "M", 0)
+    D = getattr(any_st, "rff_dim", 0)
 
     print(
         f"  N={n_total}, d_in={stream.d_in}, M={M}, D={D}, gamma={cfg.rbf_gamma} | "
@@ -462,6 +463,8 @@ def main() -> None:
     streamers = {
         # Bumped K_iter to 200 to ensure the Weighted method finds the optimal continuous distribution
         "Weighted RFF (Proposed)": StreamingCoreset(M, D, sampler_rff, batch_size=1, K_iter=1000),
+        # "Bilevel (Borsos et al.)": BilevelStreamingCoreset(total_coreset_size=M, sampler_rff=sampler_rff, num_slots=10, gamma=cfg.rbf_gamma),
+        # "Reservoir" : ReservoirRFFBaseline(M, D, sampler_rff, batch_size=1),
     }
     run_base_experiment(cfg, stream, streamers)
 

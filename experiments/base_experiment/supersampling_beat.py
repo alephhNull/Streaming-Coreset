@@ -383,7 +383,8 @@ def main() -> None:
         # High K_iter guarantees optimal continuous weights to compress the Tsunami
         "Weighted RFF (Proposed)": StreamingCoreset(M, D, sampler_rff, batch_size=1, K_iter=300),
         "SuperSampling (MMD Reservoir)": SuperSamplingCoreset(M, D, sampler_rff, batch_size=1),
-        "Unweighted RFF (Naive FW)": UnweightedStreamingCoreset(M, D, sampler_rff, batch_size=1),
+        "Reservoir Sampling": ReservoirRFFBaseline(M, D, sampler_rff, batch_size=1),
+        # "Unweighted RFF (Naive FW)": UnweightedStreamingCoreset(M, D, sampler_rff, batch_size=1),
     }
     
     run_base_experiment(cfg, stream, streamers)

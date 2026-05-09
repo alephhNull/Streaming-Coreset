@@ -1,6 +1,7 @@
 import os
 import sys
 import numpy as np
+from collections import deque
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -31,6 +32,25 @@ CIFAR10_CLASSES = [
     'airplane', 'automobile', 'bird', 'cat', 'deer',
     'dog', 'frog', 'horse', 'ship', 'truck'
 ]
+
+
+class SlidingWindowBaseline:
+    """FIFO baseline that keeps the most recent M stream timesteps."""
+
+    def __init__(self, M: int):
+        self.M = int(M)
+        self.buffer_idx = deque(maxlen=self.M)
+
+    def process_batch(self, _X_batch, _y_batch, batch_idx: int):
+        self.buffer_idx.append(int(batch_idx))
+
+    def get_indices_weights(self):
+        if len(self.buffer_idx) == 0:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+        idx = np.asarray(list(self.buffer_idx), dtype=np.int64)
+        w = np.full(idx.shape[0], 1.0 / float(idx.shape[0]), dtype=np.float64)
+        return idx, w
+    
 
 def load_stratified_stream_with_images(cfg: BaseExperimentConfig):
     """
@@ -92,16 +112,25 @@ def get_indices_from_streamer(streamer):
     if hasattr(streamer, 'get_final_coreset'):
         indices, _, _ = streamer.get_final_coreset()
         return indices
+    if hasattr(streamer, 'get_indices_weights'):
+        indices, _ = streamer.get_indices_weights()
+        return indices
     # Fallback to provenance tuples: p[0] is batch_idx (timestep)
     return [p[0] for p in streamer.buffer_provenance]
 
-def plot_stream_experiment(y_stream, images_stream, res_indices, our_indices, M, filename="stream_visualization.pdf"):
-    """Generates the requested 3-row layout."""
-    # Decreased height to 5 (from 8) to compress the overall vertical space
-    fig = plt.figure(figsize=(20, 5)) 
+def plot_stream_experiment(
+    y_stream,
+    images_stream,
+    sw_indices,
+    res_indices,
+    our_indices,
+    M,
+    filename="stream_visualization.pdf",
+):
+    """Generates a 4-row comparison layout."""
+    fig = plt.figure(figsize=(20, 7))
     
-    # Decreased hspace to 0.1 (from 0.4) to reduce space between rows
-    gs = gridspec.GridSpec(3, 1, height_ratios=[1.5, 2.5, 2.5], hspace=0.2)
+    gs = gridspec.GridSpec(4, 1, height_ratios=[1.5, 2.2, 2.2, 2.2], hspace=0.2)
     cmap = plt.get_cmap('tab10')
 
     # ==========================
@@ -138,11 +167,30 @@ def plot_stream_experiment(y_stream, images_stream, res_indices, our_indices, M,
     ax_stream.set_title("Stream Decomposition", fontsize=14, fontweight='bold')
 
     # ==========================
-    # ROW 2: Reservoir Sampling
+    # ROW 2: Sliding Window
     # ==========================
     gs_row2 = gridspec.GridSpecFromSubplotSpec(1, M, subplot_spec=gs[1], wspace=0.1)
-    for i, t in enumerate(res_indices[:M]):
+    for i, t in enumerate(sw_indices[:M]):
         ax_img = fig.add_subplot(gs_row2[0, i])
+        ax_img.imshow(images_stream[t])
+        ax_img.axis('off')
+        
+        # Bottom color ribbon
+        color = cmap(y_stream[t] % 10)
+        ribbon = Rectangle((0, -0.15), 1, 0.15, transform=ax_img.transAxes,
+                           facecolor=color, clip_on=False)
+        ax_img.add_patch(ribbon)
+        
+        if i == 0:
+            ax_img.text(-0.15, 0.5, "Sliding\nWindow", transform=ax_img.transAxes,
+                        ha='right', va='center', fontsize=12, fontweight='bold')
+
+    # ==========================
+    # ROW 3: Reservoir Sampling
+    # ==========================
+    gs_row3 = gridspec.GridSpecFromSubplotSpec(1, M, subplot_spec=gs[2], wspace=0.1)
+    for i, t in enumerate(res_indices[:M]):
+        ax_img = fig.add_subplot(gs_row3[0, i])
         ax_img.imshow(images_stream[t])
         ax_img.axis('off')
         
@@ -157,11 +205,11 @@ def plot_stream_experiment(y_stream, images_stream, res_indices, our_indices, M,
                         ha='right', va='center', fontsize=12, fontweight='bold')
 
     # ==========================
-    # ROW 3: Streaming Coreset
+    # ROW 4: Streaming Coreset
     # ==========================
-    gs_row3 = gridspec.GridSpecFromSubplotSpec(1, M, subplot_spec=gs[2], wspace=0.1)
+    gs_row4 = gridspec.GridSpecFromSubplotSpec(1, M, subplot_spec=gs[3], wspace=0.1)
     for i, t in enumerate(our_indices[:M]):
-        ax_img = fig.add_subplot(gs_row3[0, i])
+        ax_img = fig.add_subplot(gs_row4[0, i])
         ax_img.imshow(images_stream[t])
         ax_img.axis('off')
         
@@ -205,22 +253,25 @@ def main():
 
     streamers = {
         "our_coreset": StreamingCoreset(M, D, sampler_rff, batch_size=1, K_iter=100),
+        "sliding_window": SlidingWindowBaseline(M),
         "reservoir": ReservoirRFFBaseline(M, D, sampler_rff, batch_size=1),
     }
 
     print("[experiment] Simulating stream over baselines...")
     for t in range(len(X_stream)):
         streamers["our_coreset"].process_batch(X_stream[t : t + 1], y_stream[t : t + 1], batch_idx=t)
+        streamers["sliding_window"].process_batch(X_stream[t : t + 1], y_stream[t : t + 1], batch_idx=t)
         streamers["reservoir"].process_batch(X_stream[t : t + 1], y_stream[t : t + 1], batch_idx=t)
 
     # Fetch resulting indices and sort them chronologically by stream timestep
     our_indices = sorted(get_indices_from_streamer(streamers["our_coreset"]))
+    sw_indices = sorted(get_indices_from_streamer(streamers["sliding_window"]))
     res_indices = sorted(get_indices_from_streamer(streamers["reservoir"]))
 
     print("[plot] Generating requested layout...")
     # Updated output name to .pdf
     plot_path = os.path.join(cfg.output_dir, "coreset_stream_decomposition.pdf")
-    plot_stream_experiment(y_stream, images_stream, res_indices, our_indices, M, filename=plot_path)
+    plot_stream_experiment(y_stream, images_stream, sw_indices, res_indices, our_indices, M, filename=plot_path)
 
 if __name__ == "__main__":
     main()
