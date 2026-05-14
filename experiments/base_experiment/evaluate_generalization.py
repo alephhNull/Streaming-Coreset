@@ -184,24 +184,9 @@ def run_evaluation(
 
         embed_dim = X_stream.shape[1]
 
-        # ---- OCS setup: lightweight linear probe for gradient computation ----
-        # A nn.Linear probe is the natural choice for pre-embedded inputs:
-        # it is differentiable, cheap, and its gradients reflect linear
-        # separability geometry in the embedding space.
-        ocs_model = nn.Linear(embed_dim, n_classes)
-        ocs_criterion = nn.CrossEntropyLoss()
-
-        # ---- StreamFP setup: one fingerprint per class, shape (C, 1, d) ----
-        fp_embedder = IdentityEmbedder()
-        # Initialise fingerprints from per-class means of the stream — gives
-        # semantically meaningful starting geometry without extra training data.
-        fp_init = np.zeros((n_classes, embed_dim), dtype=np.float32)
-        for c in range(n_classes):
-            mask = y_stream == c
-            if mask.any():
-                fp_init[c] = X_stream[mask].mean(axis=0).astype(np.float32)
-        # Shape: (n_classes, 1, embed_dim)  — L_p = 1 token per fingerprint
-        fp_tensor = torch.tensor(fp_init, dtype=torch.float32).unsqueeze(1)
+        # ResNet-18 linear head surrogate for Bilevel (operates on pre-extracted
+        # ResNet-18 embeddings, so a linear classifier is the natural surrogate).
+        bilevel_surrogate = nn.Linear(embed_dim, n_classes)
 
         # Build fresh streamers for each M
         algo_streamers: Dict[str, Any] = {
@@ -209,38 +194,37 @@ def run_evaluation(
                 M, RFF_DIM, sampler_rff, batch_size=1, K_iter=1000
             ),
             "Bilevel": BilevelStreamingCoreset(
-                total_coreset_size=M,
-                sampler_rff=sampler_rff,
-                num_slots=10,
-                gamma=RBF_GAMMA,
-                lambda_reg=1e-3,
-                candidate_sample_size=min(200, len(X_stream)),
+                buffer_capacity=M,
+                surrogate_model=bilevel_surrogate,
+                n_classes=n_classes,
+                nr_slots=10,
             ),
-            "OnlineKCenter": OnlineKCenterStreamingCoreset(
-                M, RFF_DIM, sampler_rff, batch_size=1
-            ),
-            "StreamFP": StreamFPCoreset(
-                buffer_size=M,
-                coreset_ratio=0.5,
-                feature_extractor=fp_embedder,
-                fingerprints=fp_tensor,
-            ),
-            "OCS": OCSStreamingCoreset(
-                capacity=M,
-                model=ocs_model,
-                criterion=ocs_criterion,
-                num_classes=n_classes,
-                tau=1000.0,
-                r2c_iter=100,
-                device="cpu",
-                selection_ratio=0.5,
-            ),
-            "Reservoir": ReservoirRFFBaseline(
-                M, RFF_DIM, sampler_rff, seed=seed, batch_size=1
-            ),
-            "SuperSampling": SuperSamplingCoreset(
-                M, RFF_DIM, sampler_rff, batch_size=1
-            ),
+            # ---- baselines commented out for StreamCore vs Bilevel comparison ----
+            # "OnlineKCenter": OnlineKCenterStreamingCoreset(
+            #     M, RFF_DIM, sampler_rff, batch_size=1
+            # ),
+            # "StreamFP": StreamFPCoreset(
+            #     buffer_size=M,
+            #     coreset_ratio=0.5,
+            #     feature_extractor=fp_embedder,
+            #     fingerprints=fp_tensor,
+            # ),
+            # "OCS": OCSStreamingCoreset(
+            #     capacity=M,
+            #     model=ocs_model,
+            #     criterion=ocs_criterion,
+            #     num_classes=n_classes,
+            #     tau=1000.0,
+            #     r2c_iter=100,
+            #     device="cpu",
+            #     selection_ratio=0.5,
+            # ),
+            # "Reservoir": ReservoirRFFBaseline(
+            #     M, RFF_DIM, sampler_rff, seed=seed, batch_size=1
+            # ),
+            # "SuperSampling": SuperSamplingCoreset(
+            #     M, RFF_DIM, sampler_rff, batch_size=1
+            # ),
         }
 
         # --- Stream all data ---

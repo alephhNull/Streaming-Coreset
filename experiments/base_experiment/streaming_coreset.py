@@ -41,6 +41,32 @@ class StreamingCoreset(AbstractStreamingCoreset):
         self._finalized = False
         self.mmd_history: List[float] = []
 
+    def _compute_removal_deltas(self, mu_pi: np.ndarray, current_embedding: np.ndarray, X_buf_rff: np.ndarray, weights: np.ndarray) -> np.ndarray:
+        """
+        Compute exact immediate increase in squared error (MMD^2) if we remove each point j
+        and renormalize remaining weights (no re-optimization).
+        Returns deltas array length Nbuf.
+        """
+        r = mu_pi - current_embedding
+        mu = current_embedding
+        phis = X_buf_rff
+        w = weights
+        one_minus_w = 1.0 - w
+        eps = 1e-12
+        unstable_mask = one_minus_w <= 1e-8
+
+        mu_minus_phi = mu[None, :] - phis  # (N, D)
+        norm2 = np.sum(mu_minus_phi * mu_minus_phi, axis=1)  # (N,)
+        r_dot = np.dot(mu_minus_phi, r)  # (N,)
+
+        numer = w * w
+        denom = np.maximum(one_minus_w * one_minus_w, eps)
+        term1 = numer / denom * norm2
+        term2 = 2.0 * (w / np.maximum(one_minus_w, eps)) * r_dot
+        deltas = term1 - term2
+        deltas[unstable_mask] = np.inf
+        return deltas
+
     def _process_point(self, x_raw, y_label, z_rff, batch_idx, local_idx):
         self.t += 1
         alpha = 1.0 / self.t
@@ -82,8 +108,17 @@ class StreamingCoreset(AbstractStreamingCoreset):
                 self.buffer_weights[idx_s] += gamma
                 self.buffer_weights[idx_v] -= gamma
 
+        # --- Updated Eviction Logic ---
         if len(self.buffer_Z) > self.M:
-            evict = np.argmin(self.buffer_weights)
+            current_embedding = self.buffer_Z.T @ self.buffer_weights
+            deltas = self._compute_removal_deltas(
+                mu_pi=self.mean_rff,
+                current_embedding=current_embedding,
+                X_buf_rff=self.buffer_Z,
+                weights=self.buffer_weights
+            )
+            evict = np.argmin(deltas)
+            
             self.buffer_Z = np.delete(self.buffer_Z, evict, axis=0)
             self.buffer_weights = np.delete(self.buffer_weights, evict)
             del self.buffer_X[evict]

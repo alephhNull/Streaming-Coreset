@@ -1,215 +1,176 @@
-"""
-OCS: Online Coreset Selection via gradient matching.
-
-Reference: "Online Coreset Selection for Rehearsal-based Continual Learning"
-           (Yoon et al., 2022).
-"""
-
-from __future__ import annotations
-
-import os   
-import sys
-from typing import List, Tuple
-
+from abc import ABC, abstractmethod
+from typing import Tuple, List, Any
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-
-from streamers.abstract_streamer import AbstractStreamingCoreset
-
+class AbstractStreamingCoreset(ABC):
+    @abstractmethod
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
+        pass
+    
+    @abstractmethod
+    def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
+        pass
+    
+    @abstractmethod
+    def print_coreset_provenance(self) -> None:
+        pass
 
 class OCSStreamingCoreset(AbstractStreamingCoreset):
     """
-    Online Coreset Selection (OCS) via gradient similarity + diversity scoring.
-
-    Includes mini-batch accumulation (to support b=1 stream loops) and
-    surrogate model training on the retained points to generate meaningful gradients.
+    Online Coreset Selection (OCS) for Rehearsal-based Continual Learning.
+    Paper: https://openreview.net/forum?id=f9D-5WNG4Nv (ICLR 2022)
+    
+    This algorithm manages a streaming memory buffer by selecting samples that maximize:
+    1. Minibatch Similarity (S): Representativeness for the current task.
+    2. Sample Diversity (V): Minimal redundancy among selected samples.
+    3. Coreset Affinity (A): Minimal interference with previously stored knowledge.
     """
-
+    
     def __init__(
-        self,
-        capacity: int,
-        model: nn.Module,
-        criterion: nn.Module,
-        num_classes: int,
-        tau: float = 1000.0,
-        r2c_iter: int = 100,
-        device: str = "cpu",
-        selection_ratio: float = 0.5,
-        mini_batch_size: int = 20,  # <-- Accumulates incoming points to score them together
+        self, 
+        buffer_capacity: int, 
+        surrogate_model: nn.Module, 
+        criterion: nn.Module, 
+        device: torch.device,
+        tau: float = 1000.0  # Hyperparameter balancing current adaptation vs. past affinity (from author's config)
     ):
-        self.capacity = capacity
-        self.model = model.to(device)
-        self.criterion = criterion
-        self.num_classes = num_classes
-        self.tau = tau
-        self.r2c_iter = r2c_iter
+        self.buffer_capacity = buffer_capacity
+        self.surrogate_model = surrogate_model.to(device)
+        self.criterion = criterion.to(device)
         self.device = device
-        self.selection_ratio = selection_ratio
-        self.mini_batch_size = mini_batch_size
-
-        self.global_batch_counter: int = 0
-
-        # Physical buffer
-        self.buffer_X: List[np.ndarray] = []
-        self.buffer_y: List[int] = []
+        self.tau = tau
+        
+        # Internal state for the streaming buffer
+        self.buffer_X: torch.Tensor = None
+        self.buffer_y: torch.Tensor = None
         self.buffer_provenance: List[Tuple[int, int]] = []
-        self.mmd_history: List[float] = []
-
-        # Local accumulation buffers (to handle b=1 loop)
-        self.local_X_accum: List[np.ndarray] = []
-        self.local_y_accum: List[int] = []
-        self.local_prov_accum: List[Tuple[int, int]] = []
-
-        # Setup the optimizer to actually train the surrogate model!
-        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01)
-
-    # ------------------------------------------------------------------
-    # Interface compatibility
-    # ------------------------------------------------------------------
-
-    @property
-    def M(self) -> int:
-        return self.capacity
-
-    @property
-    def buffer_weights(self) -> np.ndarray:
-        n = len(self.buffer_X)
-        if n == 0:
-            return np.empty(0, dtype=np.float64)
-        return np.ones(n, dtype=np.float64) / float(n)
-
-    # ------------------------------------------------------------------
-    # Gradient utilities
-    # ------------------------------------------------------------------
-
-    def _flat_grads(self) -> torch.Tensor:
-        parts = [
-            p.grad.detach().flatten()
-            for p in self.model.parameters()
-            if p.grad is not None
-        ]
-        return torch.cat(parts) if parts else torch.zeros(1, device=self.device)
-
-    def _per_example_grads(self, X: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        self.model.eval()
-        grads = []
+        
+    def _compute_per_example_gradients(self, X: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Dynamically computes flattened per-example gradients for arbitrary surrogate models.
+        This ensures task and architecture agnosticism.
+        """
+        self.surrogate_model.eval()
+        example_grads = []
+        
+        # We loop over the batch to extract per-example gradients.
+        # (In a production environment, libraries like functorch/vmap or Backpack could optimize this)
         for i in range(len(X)):
-            self.model.zero_grad()
-            loss = self.criterion(self.model(X[i : i + 1]), y[i : i + 1])
-            loss.backward()
-            grads.append(self._flat_grads())
-        return torch.stack(grads)  # (b, P)
-
-    def _score(self, g: torch.Tensor, eg: torch.Tensor, ref_grads: torch.Tensor | None) -> torch.Tensor:
-        eps = torch.ones(eg.shape[0], device=self.device) * 1e-6
-
-        ng = torch.norm(g)
-        neg = torch.norm(eg, dim=1)
-
-        mean_sim = torch.matmul(g, eg.t()) / torch.maximum(ng * neg, eps)
-
-        negd = neg.unsqueeze(1)
-        cross_div = torch.matmul(eg, eg.t()) / torch.maximum(
-            torch.matmul(negd, negd.t()),
-            torch.ones(eg.shape[0], eg.shape[0], device=self.device) * 1e-6,
-        )
-        mean_div = cross_div.mean(dim=0)
-
-        coreset_aff = torch.zeros(eg.shape[0], device=self.device)
-        if ref_grads is not None:
-            ref_ng = torch.norm(ref_grads)
-            coreset_aff = torch.matmul(ref_grads, eg.t()) / torch.maximum(ref_ng * neg, eps)
-
-        return mean_sim - mean_div + self.tau * coreset_aff
-
-    # ------------------------------------------------------------------
-    # AbstractStreamingCoreset interface
-    # ------------------------------------------------------------------
+            self.surrogate_model.zero_grad()
+            output = self.surrogate_model(X[i:i+1])
+            loss = self.criterion(output, y[i:i+1])
+            
+            # Extract and flatten gradients for all parameters
+            grads = torch.autograd.grad(loss, self.surrogate_model.parameters())
+            flat_grad = torch.cat([g.detach().view(-1) for g in grads])
+            example_grads.append(flat_grad)
+            
+        return torch.stack(example_grads)
 
     def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
-        # 1. Accumulate points until we hit the mini-batch threshold
-        for i in range(X_batch_np.shape[0]):
-            self.local_X_accum.append(X_batch_np[i])
-            self.local_y_accum.append(y_batch_np[i])
-            self.local_prov_accum.append((batch_idx, i))
-
-        if len(self.local_X_accum) < self.mini_batch_size:
-            return  # Wait for more data before processing
-
-        # 2. Convert accumulated batch to tensors
-        X_t = torch.tensor(np.array(self.local_X_accum), dtype=torch.float32, device=self.device)
-        y_t = torch.tensor(np.array(self.local_y_accum), dtype=torch.long, device=self.device)
-
-        b = len(self.local_X_accum)
-        k = max(1, int(b * self.selection_ratio))
-        self.global_batch_counter += 1
-
-        # 3. OCS Selection (Random warmup vs Gradient Scoring)
-        if self.global_batch_counter <= self.r2c_iter:
-            pick = torch.randperm(b)[:k].cpu().numpy()
-        else:
-            eg = self._per_example_grads(X_t, y_t)
-            g = eg.mean(dim=0)
-
+        """
+        Processes an incoming batch, scoring elements based on OCS equations, 
+        and evicts the lowest-scoring points if the buffer exceeds capacity M.
+        """
+        # 1. Bridge numpy arrays to PyTorch Tensors
+        X_batch = torch.from_numpy(X_batch_np).float().to(self.device)
+        y_batch = torch.from_numpy(y_batch_np).long().to(self.device)
+        
+        # Create provenance tracking for the incoming batch
+        batch_provenance = [(batch_idx, i) for i in range(len(X_batch))]
+        
+        if self.buffer_X is None or len(self.buffer_X) == 0:
+            # First initialization: No previous coreset to compute Affinity (A) against.
+            pool_X = X_batch
+            pool_y = y_batch
+            pool_prov = batch_provenance
             ref_grads = None
-            if self.buffer_X:
-                buf_X = torch.tensor(np.vstack(self.buffer_X), dtype=torch.float32, device=self.device)
-                buf_y = torch.tensor(self.buffer_y, dtype=torch.long, device=self.device)
-                self.model.zero_grad()
-                ref_loss = self.criterion(self.model(buf_X), buf_y)
-                ref_loss.backward()
-                ref_grads = self._flat_grads()
+        else:
+            # 2. Compute the reference gradients (mean gradients of the EXISTING buffer)
+            # This represents the "knowledge of previous tasks" for Coreset Affinity
+            with torch.no_grad():
+                buffer_eg = self._compute_per_example_gradients(self.buffer_X, self.buffer_y)
+                ref_grads = torch.mean(buffer_eg, dim=0)
+            
+            # Combine existing buffer and new batch into a single evaluation pool
+            pool_X = torch.cat([self.buffer_X, X_batch], dim=0)
+            pool_y = torch.cat([self.buffer_y, y_batch], dim=0)
+            pool_prov = self.buffer_provenance + batch_provenance
 
-            scores = self._score(g, eg, ref_grads)
-            pick = torch.argsort(scores, descending=True)[:k].cpu().numpy()
+        # If total pool is within capacity, just store and return
+        if len(pool_X) <= self.buffer_capacity:
+            self.buffer_X = pool_X
+            self.buffer_y = pool_y
+            self.buffer_provenance = pool_prov
+            return
 
-        # 4. Train the surrogate model on the selected informative points!
-        self.model.train()
-        self.optimizer.zero_grad()
-        loss = self.criterion(self.model(X_t[pick]), y_t[pick])
-        loss.backward()
-        self.optimizer.step()
-
-        # 5. Add to buffer and handle eviction (Label-Agnostic FIFO)
-        for idx in pick:
-            self.buffer_X.append(self.local_X_accum[idx])
-            self.buffer_y.append(self.local_y_accum[idx])
-            self.buffer_provenance.append(self.local_prov_accum[idx])
-
-        while len(self.buffer_X) > self.capacity:
-            # Simple FIFO eviction 
-            self.buffer_X.pop(0)
-            self.buffer_y.pop(0)
-            self.buffer_provenance.pop(0)
-
-        # 6. Clear local accumulation and record history
-        self.local_X_accum = []
-        self.local_y_accum = []
-        self.local_prov_accum = []
-        self.mmd_history.append(0.0)
+        # 3. Compute per-example gradients for the ENTIRE pool
+        eg = self._compute_per_example_gradients(pool_X, pool_y)
+        
+        # 4. Compute Mean Gradient of the current pool (used for Minibatch Similarity)
+        g = torch.mean(eg, dim=0)
+        
+        # Precompute norms for stability and cosine similarity computations
+        ng = torch.norm(g)
+        neg = torch.norm(eg, dim=1)
+        eps = torch.ones_like(neg) * 1e-6
+        neg_clamped = torch.maximum(neg, eps)
+        
+        # --- Eq 3: Minibatch Similarity (S) ---
+        # Selects samples representative of the current combined target dataset
+        # S(b | B) = dot(grad(b), mean_grad(B)) / (norm(grad(b)) * norm(mean_grad(B)))
+        mean_sim = torch.matmul(eg, g) / torch.maximum(ng * neg, eps)
+        
+        # --- Eq 4: Sample Diversity (V) ---
+        # Discourages redundancy by computing negative cross-divergence
+        # V(b | B \ b) represented as negative average similarity to all other samples
+        negd = torch.unsqueeze(neg_clamped, 1)
+        cross_sim_matrix = torch.matmul(eg, eg.t()) / torch.maximum(torch.matmul(negd, negd.t()), eps.unsqueeze(1) * eps)
+        mean_div = torch.mean(cross_sim_matrix, dim=0) 
+        
+        # --- Eq 7: Coreset Affinity (A) ---
+        # Promotes minimum interference with the previous tasks
+        coreset_aff = torch.zeros_like(mean_sim)
+        if ref_grads is not None:
+            ref_ng = torch.norm(ref_grads)
+            coreset_aff = torch.matmul(eg, ref_grads) / torch.maximum(ref_ng * neg, eps)
+            
+        # --- Eq 8: Final OCS Selection Criterion ---
+        # argmax (S + V + tau * A) -> V is represented by subtracting mean_div
+        measure = mean_sim - mean_div + (self.tau * coreset_aff)
+        
+        # 5. Eviction Logic: Sort descending and truncate to buffer_capacity
+        _, top_indices = torch.sort(measure, descending=True)
+        keep_indices = top_indices[:self.buffer_capacity]
+        
+        # 6. Update the internal buffer state
+        self.buffer_X = pool_X[keep_indices]
+        self.buffer_y = pool_y[keep_indices]
+        self.buffer_provenance = [pool_prov[i.item()] for i in keep_indices]
 
     def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
         """
-        Returns the current buffer as the final coreset representation.
+        Returns the final coreset points, their labels, and their exact provenance.
         """
-        if not self.buffer_X:
+        if self.buffer_X is None:
             return np.array([]), np.array([]), []
-
-        n = len(self.buffer_X)
-        X_out = np.vstack(self.buffer_X)
-        weights = np.ones(n) / n
-        return X_out, weights, list(self.buffer_provenance)
+            
+        final_X = self.buffer_X.cpu().numpy()
+        final_y = self.buffer_y.cpu().numpy()
+        
+        return final_X, final_y, self.buffer_provenance
 
     def print_coreset_provenance(self) -> None:
+        """
+        Utility print out demonstrating which incoming batches specific points survived from.
+        """
         if not self.buffer_provenance:
-            print("Coreset buffer is empty.")
+            print("Buffer is currently empty.")
             return
-        w = 1.0 / len(self.buffer_provenance)
-        print(f"Coreset size: {len(self.buffer_provenance)}")
-        for b_idx, l_idx in self.buffer_provenance:
-            print(f"  weight={w:.4f} | batch={b_idx} | local={l_idx}")
+            
+        print(f"--- Coreset Provenance (Capacity {self.buffer_capacity}) ---")
+        for i, (batch_idx, local_idx) in enumerate(self.buffer_provenance):
+            print(f"Slot {i:03d} -> Source Batch {batch_idx:03d}, Local Index: {local_idx:03d}")

@@ -1,246 +1,314 @@
+from abc import ABC, abstractmethod
+from typing import Optional, Tuple, List, Any
 import numpy as np
-import random
-from typing import List, Tuple
-from streamers.abstract_streamer import AbstractStreamingCoreset
+import torch
+import torch.nn as nn
+
+class AbstractStreamingCoreset(ABC):
+    @abstractmethod
+    def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
+        pass
+    @abstractmethod
+    def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
+        pass
+    @abstractmethod
+    def print_coreset_provenance(self) -> None:
+        pass
+
 
 class BilevelStreamingCoreset(AbstractStreamingCoreset):
     """
-    Implementation of "Coresets via Bilevel Optimization for Continual Learning and Streaming" (Borsos et al., 2020).
-    Uses Merge-Reduce for maintaining a streaming replay buffer and Kernel Ridge Regression (KRR) proxy for subset selection.
+    Implements the Streaming Coreset via Bilevel Optimization as described in:
+    "Coresets via Bilevel Optimization for Continual Learning and Streaming"
+
+    Uses the Merge-Reduce framework for streaming buffer management and
+    Greedy Forward Selection via Matching Pursuit (Algorithm 1) for
+    summarization, computing implicit gradients through a surrogate model.
+
+    The surrogate model determines the gradient geometry used for selection.
+    By default a linear head (nn.Linear) is built once the first batch
+    arrives and the embedding dimension is known; pass `surrogate_model`
+    explicitly to use a fixed architecture (e.g. ResNet-18 linear head).
     """
-    
-    def __init__(self, total_coreset_size: int, sampler_rff, num_slots: int = 10, gamma: float = 5e-4, lambda_reg: float = 1e-3, candidate_sample_size: int = 200):
-        """
-        Args:
-            total_coreset_size (int): The total capacity of the streaming buffer.
-            sampler_rff: RFF sampler for computing L2 surrogate in RFF space.
-            num_slots (int): The number of slots for the merge-reduce framework (default is s=10 as per streaming experiments).
-            gamma (float): RBF kernel parameter.
-            lambda_reg (float): Regularization strength for the KRR proxy inner objective.
-            candidate_sample_size (int): Number of greedy candidates sampled per forward selection step.
-        """
-        self.num_slots = num_slots
-        # To maintain the total size across 'num_slots', each slot has capacity total_coreset_size // num_slots.
-        self.m_slot = max(1, total_coreset_size // num_slots) 
-        self.gamma = gamma
-        self.lambda_reg = lambda_reg
-        self.candidate_sample_size = candidate_sample_size
-        self.sampler_rff = sampler_rff
-        
-        # Buffer stores tuples of: (X, y, provenance, beta)
+    def __init__(self,
+                 buffer_capacity: int,
+                 surrogate_model: Optional[nn.Module] = None,
+                 criterion: Optional[nn.Module] = None,
+                 device: Optional[torch.device] = None,
+                 nr_slots: int = 10,
+                 n_classes: int = 10):
+
+        self.buffer_capacity = buffer_capacity
+        self._surrogate_model = surrogate_model   # may be None until first batch
+        self.criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
+        self.device = device if device is not None else torch.device("cpu")
+        self.n_classes = n_classes
+
+        # Buffer Management (Section 5: Streaming Coresets via Merge-Reduce)
+        # "we divide the buffer into s equally-sized slots"
+        self.nr_slots = nr_slots
+        self.slot_size = max(1, buffer_capacity // nr_slots)
+
+        # Buffer holds tuples of: (X_tensor, y_tensor, slot_weight, provenance_list)
         self.buffer = []
-        self._mmd_history = []
-        self._cumulative_phi = None
-        self._n_seen = 0
+
+    # ------------------------------------------------------------------
+    # Lazy surrogate initialisation
+    # ------------------------------------------------------------------
+
+    @property
+    def surrogate_model(self) -> nn.Module:
+        return self._surrogate_model
+
+    def _ensure_surrogate(self, embed_dim: int) -> None:
+        """Build a linear head if no surrogate was supplied at construction."""
+        if self._surrogate_model is None:
+            self._surrogate_model = nn.Linear(embed_dim, self.n_classes)
+        self._surrogate_model = self._surrogate_model.to(self.device)
+
+    # ------------------------------------------------------------------
+    # Public buffer views  (expected by _extract_buffer in eval scripts)
+    # ------------------------------------------------------------------
 
     @property
     def buffer_X(self) -> List[np.ndarray]:
-        """Compatibility property for run_base_experiment."""
-        return [X for X, _, _, _ in self.buffer]
+        """One numpy array per coreset point (shape: [embed_dim])."""
+        result: List[np.ndarray] = []
+        for X_tensor, _, _, _ in self.buffer:
+            for i in range(len(X_tensor)):
+                result.append(X_tensor[i].detach().cpu().numpy())
+        return result
 
     @property
-    def buffer_y(self) -> np.ndarray:
-        """Compatibility property for run_base_experiment. Flattens all labels in the buffer."""
-        if not self.buffer:
-            return np.array([])
-        all_y = [y for _, y, _, _ in self.buffer]
-        return np.concatenate(all_y, axis=0)
+    def buffer_y(self) -> List[int]:
+        """Class label for each coreset point."""
+        result: List[int] = []
+        for _, y_tensor, _, _ in self.buffer:
+            for yi in y_tensor.detach().cpu().numpy():
+                result.append(int(yi))
+        return result
 
     @property
     def buffer_weights(self) -> np.ndarray:
-        """Compatibility property for run_base_experiment. Returns uniform weights across all points."""
+        """Per-point importance weights normalised to sum to 1.0.
+
+        Within each slot, weight is proportional to how many original
+        stream points that slot represents (slot_weight), divided equally
+        among the slot's coreset points.
+        """
         if not self.buffer:
-            return np.array([])
-        total_points = sum(len(X) for X, _, _, _ in self.buffer)
-        return np.ones(total_points) / total_points
-
-    @property
-    def mmd_history(self) -> List[float]:
-        """Compatibility property for run_base_experiment. Bilevel doesn't track internal MMD, so we return zeros."""
-        if not hasattr(self, "_mmd_history"):
-            return []
-        return self._mmd_history
-
-    @property
-    def M(self) -> int:
-        """Compatibility property for run_base_experiment."""
-        return self.m_slot * self.num_slots
-
-    @property
-    def rff_dim(self) -> int:
-        """Compatibility property for run_base_experiment. Bilevel works in input space."""
-        if not self.buffer:
-            return 0
-        return self.buffer[0][0].shape[1]
-
-    def _rbf_kernel(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
-        """Computes the RBF Kernel between X1 and X2."""
-        # Equivalent to exp(-gamma * ||X1 - X2||^2)
-        X1_sq = np.sum(X1**2, axis=1, keepdims=True)
-        X2_sq = np.sum(X2**2, axis=1)
-        dist_sq = X1_sq + X2_sq - 2 * np.dot(X1, X2.T)
-        return np.exp(-self.gamma * np.clip(dist_sq, 0, None))
-
-    def _to_one_hot(self, y: np.ndarray) -> np.ndarray:
-        """Dynamically one-hot encodes integer labels for the KRR proxy."""
-        if y.ndim > 1 and y.shape[1] > 1:
-            return y
-        y_int = y.astype(int).flatten()
-        num_classes = np.max(y_int) + 1
-        return np.eye(num_classes)[y_int]
-
-    def _construct_coreset(self, X: np.ndarray, y: np.ndarray, prov: List[Tuple[int, int]], m: int) -> Tuple[np.ndarray, np.ndarray, List]:
-        """
-        Algorithm 1: Coresets via Bilevel Optimization (Proxy Formulation with greedy forward selection).
-        """
-        n = X.shape[0]
-        if n <= m:
-            return X, y, prov
-
-        # Standardize features for kernel as per Appendix E data preprocessing rules
-        X_std = (X - np.mean(X, axis=0)) / (np.std(X, axis=0) + 1e-8)
-        Y_one_hot = self._to_one_hot(y)
-        K = self._rbf_kernel(X_std, X_std)
-
-        # Initialize with a random point
-        start_idx = random.randint(0, n - 1)
-        S = [start_idx]
-        rem_indices = set(range(n)) - {start_idx}
-
-        # Greedy forward selection
-        for t in range(2, m + 1):
-            if not rem_indices:
-                break
-                
-            # Random sample of candidate points to speed up outer objective evaluation
-            num_to_sample = min(self.candidate_sample_size, len(rem_indices))
-            C_candidates = random.sample(list(rem_indices), num_to_sample)
-            
-            best_k = -1
-            best_loss = float('inf')
-            
-            for k in C_candidates:
-                S_cand = S + [k]
-                K_cand_inner = K[np.ix_(S_cand, S_cand)]
-                Y_cand = Y_one_hot[S_cand]
-                
-                # Closed form inner optimization for KRR (Equation 6 equivalent / Section 6.1)
-                try:
-                    alpha = np.linalg.solve(K_cand_inner + self.lambda_reg * np.eye(len(S_cand)), Y_cand)
-                except np.linalg.LinAlgError:
-                    alpha = np.linalg.pinv(K_cand_inner + self.lambda_reg * np.eye(len(S_cand))) @ Y_cand
-                
-                # Evaluate outer objective (validation on full batch)
-                K_all_cand = K[:, S_cand]
-                y_pred = K_all_cand @ alpha
-                loss = np.mean((Y_one_hot - y_pred) ** 2)
-                
-                if loss < best_loss:
-                    best_loss = loss
-                    best_k = k
-                    
-            S.append(best_k)
-            rem_indices.remove(best_k)
-            
-        return X[S], y[S], [prov[i] for i in S]
-
-    def _select_index(self) -> int:
-        """
-        Algorithm 3: select_index for determining which buffer slots to merge.
-        """
-        s = len(self.buffer) - 1
-        if s == 1 or self.buffer[s-1][3] > self.buffer[s][3]:
-            return s - 1
-        else:
-            # Finding argmin_i (beta_i == beta_i+1) translates to finding the first matching weight
-            for i in range(s):
-                if self.buffer[i][3] == self.buffer[i+1][3]:
-                    return i
-            return s - 1 
+            return np.array([], dtype=np.float64)
+        total_weight = sum(slot[2] for slot in self.buffer)
+        if total_weight <= 0.0:
+            total_weight = 1.0
+        weights: List[float] = []
+        for X_tensor, _, w, _ in self.buffer:
+            n = len(X_tensor)
+            if n > 0:
+                per_point = w / (n * total_weight)
+                weights.extend([per_point] * n)
+        arr = np.array(weights, dtype=np.float64)
+        s = arr.sum()
+        if s > 1e-12:
+            arr /= s
+        return arr
 
     def process_batch(self, X_batch_np: np.ndarray, y_batch_np: np.ndarray, batch_idx: int) -> None:
         """
-        Algorithm 2: Streaming coresets via merge-reduce.
+        Receives a new batch of data, summarizes it down to slot_size, and appends it to the buffer.
+        If the buffer exceeds the maximum number of slots, we execute the Merge-Reduce step.
         """
-        # Update cumulative mean embedding in RFF space for L2 surrogate tracking
-        phi_batch = self.sampler_rff.transform(X_batch_np)
-        batch_sum_phi = np.sum(phi_batch, axis=0)
-        if self._cumulative_phi is None:
-            self._cumulative_phi = batch_sum_phi
-        else:
-            self._cumulative_phi += batch_sum_phi
-        self._n_seen += X_batch_np.shape[0]
-        mu_t = self._cumulative_phi / self._n_seen
+        # Lazy-build the surrogate the first time we see data
+        self._ensure_surrogate(X_batch_np.shape[1])
 
-        # Create local provenance mapping
-        prov = [(batch_idx, i) for i in range(X_batch_np.shape[0])]
+        # The Numpy/Torch Bridge
+        X_tensor = torch.from_numpy(X_batch_np).float().to(self.device)
+        y_tensor = torch.from_numpy(y_batch_np).long().to(self.device)
         
-        # Construct summary for the new batch
-        C_X, C_y, C_prov = self._construct_coreset(X_batch_np, y_batch_np, prov, self.m_slot)
-        beta_t = X_batch_np.shape[0]
+        # Track data provenance (batch_idx, local_idx)
+        prov = [(batch_idx, i) for i in range(len(X_batch_np))]
         
-        self.buffer.append((C_X, C_y, C_prov, beta_t))
+        # Compress the new batch into a single slot size using Bilevel Optimization
+        X_reduced, y_reduced, prov_reduced = self._bilevel_greedy_selection(X_tensor, y_tensor, prov, self.slot_size)
         
-        # Merge-reduce loop if buffer exceeds slot limits
-        while len(self.buffer) > self.num_slots:
-            k = self._select_index()
-            
-            X_k, y_k, prov_k, beta_k = self.buffer[k]
-            X_k1, y_k1, prov_k1, beta_k1 = self.buffer[k+1]
-            
-            # Merge
-            X_merged = np.vstack([X_k, X_k1])
-            y_merged = np.concatenate([y_k, y_k1], axis=0) if y_k.ndim == 1 else np.vstack([y_k, y_k1])
-            prov_merged = prov_k + prov_k1
-            
-            # Reduce
-            C_X_prime, C_y_prime, C_prov_prime = self._construct_coreset(X_merged, y_merged, prov_merged, self.m_slot)
-            beta_prime = beta_k + beta_k1
-            
-            # Replace
-            del self.buffer[k+1]
-            self.buffer[k] = (C_X_prime, C_y_prime, C_prov_prime, beta_prime)
+        # "A new batch is compressed into a new slot with associated \beta... and is appended to the buffer"
+        batch_weight = len(X_batch_np) / self.slot_size  # \beta proportional to the number of points it represents
+        self.buffer.append((X_reduced, y_reduced, batch_weight, prov_reduced))
+        
+        # "The reduction to size m happens as follows: select consecutive slots i and i+1..., 
+        # join the contents (merge) and create the coreset of the merged data (reduce)."
+        if len(self.buffer) > self.nr_slots:
+            self._merge_reduce()
 
-        # Compute L2 surrogate for the current coreset
-        all_X = []
-        for X_slot, _, _, _ in self.buffer:
-            all_X.append(X_slot)
-        Z = np.vstack(all_X)
-        phi_Z = self.sampler_rff.transform(Z)
-        # Bilevel uses uniform weights for its final coreset
-        w = np.ones(len(Z)) / len(Z)
-        mu_coreset = w @ phi_Z
-        l2_surrogate = np.linalg.norm(mu_t - mu_coreset)
-        self._mmd_history.append(float(l2_surrogate))
+    def _merge_reduce(self) -> None:
+        """
+        Maintains the buffer capacity M by merging consecutive slots with the lowest 
+        combined weight and then reducing them back down to `slot_size`.
+        """
+        # Find the two consecutive slots with the minimum combined weight
+        min_weight = float('inf')
+        merge_idx = 0
+        
+        for i in range(len(self.buffer) - 1):
+            combined_weight = self.buffer[i][2] + self.buffer[i+1][2]
+            if combined_weight < min_weight:
+                min_weight = combined_weight
+                merge_idx = i
+                
+        # Merge contents
+        X1, y1, w1, prov1 = self.buffer[merge_idx]
+        X2, y2, w2, prov2 = self.buffer[merge_idx + 1]
+        
+        X_merged = torch.cat([X1, X2], dim=0)
+        y_merged = torch.cat([y1, y2], dim=0)
+        prov_merged = prov1 + prov2
+        new_weight = w1 + w2 
+        
+        # Reduce back to slot_size using Algorithm 1
+        X_reduced, y_reduced, prov_reduced = self._bilevel_greedy_selection(X_merged, y_merged, prov_merged, self.slot_size)
+        
+        # Update buffer by removing the two old slots and inserting the new merged-reduced slot
+        new_slot = (X_reduced, y_reduced, new_weight, prov_reduced)
+        self.buffer.pop(merge_idx + 1)
+        self.buffer[merge_idx] = new_slot
+
+    def _bilevel_greedy_selection(self, X: torch.Tensor, y: torch.Tensor, prov: List, m: int):
+        """
+        Implements Algorithm 1: Coresets via Bilevel Optimization using matching pursuit.
+        Selects a subset of size `m` by greedily maximizing the bilinear similarity (Eq 5).
+        """
+        n = len(X)
+        if n <= m:
+            return X, y, prov
+            
+        self.surrogate_model.eval()  # Keep deterministic for scoring
+        params = list(self.surrogate_model.parameters())
+        
+        # Step 1 & 2: Initialize selected set (S_t) with 1 random index
+        selected_indices = [np.random.randint(n)]
+        
+        # Step 3: Incremental Subset Selection
+        for t in range(2, m + 1):
+            
+            # Outer objective gradient: \nabla_\theta g(\theta) over ALL candidate data
+            self.surrogate_model.zero_grad()
+            out_all = self.surrogate_model(X)
+            loss_outer = self.criterion(out_all, y)
+            grad_outer = self._flat_grad(loss_outer, params, create_graph=False, retain_graph=True)
+            
+            # Inner objective loss evaluation: f(\theta) over CURRENT selected data S_{t-1}
+            X_S = X[selected_indices]
+            y_S = y[selected_indices]
+            
+            self.surrogate_model.zero_grad()
+            out_inner = self.surrogate_model(X_S)
+            loss_inner = self.criterion(out_inner, y_S)
+            
+            # Inverse Hessian-Vector Product: (\nabla^2 f)^{-1} \nabla g 
+            # Note: Approximates Eq. (3)
+            ihvp_v = self._ihvp(loss_inner, params, grad_outer)
+            
+            # Find point k* that maximizes the negative implicit gradient (Eq. 5)
+            best_score = -float('inf')
+            best_k = -1
+            
+            candidates = [i for i in range(n) if i not in selected_indices]
+            for k in candidates:
+                self.surrogate_model.zero_grad()
+                out_k = self.surrogate_model(X[k:k+1])
+                loss_k = self.criterion(out_k, y[k:k+1])
+                
+                # J_k = \nabla_\theta l_k(\theta)
+                J_k = self._flat_grad(loss_k, params, create_graph=False, retain_graph=False)
+                
+                # Bilinear similarity: J_k^T * (H^{-1} * \nabla g)
+                score = torch.dot(J_k, ihvp_v).item()
+                
+                if score > best_score:
+                    best_score = score
+                    best_k = k
+                    
+            # Add selected atom to support
+            selected_indices.append(best_k)
+
+        # Gather the final subset
+        X_core = X[selected_indices]
+        y_core = y[selected_indices]
+        prov_core = [prov[i] for i in selected_indices]
+        
+        return X_core, y_core, prov_core
 
     def get_final_coreset(self) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
         """
-        Extracts and flattens the contents of the slots and applies uniform distribution weights.
+        Concatenates all slots in the buffer to yield the final task-agnostic coreset.
         """
         if not self.buffer:
             return np.array([]), np.array([]), []
             
-        all_X = []
-        all_prov = []
+        X_final = torch.cat([slot[0] for slot in self.buffer], dim=0).cpu().numpy()
+        y_final = torch.cat([slot[1] for slot in self.buffer], dim=0).cpu().numpy()
+        prov_final = sum([slot[3] for slot in self.buffer], [])
         
-        for X_slot, _, prov_slot, _ in self.buffer:
-            all_X.append(X_slot)
-            all_prov.extend(prov_slot)
-            
-        total_points = len(all_prov)
-        weights = np.ones(total_points) / total_points
-        
-        # In a real dynamic stream, mapping to a global flat index requires a stateful counter tracking stream elements.
-        # Without access to total global indices mapped arbitrarily, it is represented as sequential markers mapping local slots.
-        flat_indices = np.arange(total_points) 
-        
-        return flat_indices, weights, all_prov
+        return X_final, y_final, prov_final
 
     def print_coreset_provenance(self) -> None:
+        if not self.buffer:
+            print("Buffer is currently empty.")
+            return
+            
+        print(f"--- Coreset Provenance (Buffer Capacity: {self.buffer_capacity}, Slots: {len(self.buffer)}) ---")
+        for idx, (_, _, w, prov) in enumerate(self.buffer):
+            print(f"Slot {idx} [Weight: {w:.2f}]: {len(prov)} items -> {prov[:3]} ...")
+
+    # =========================================================================
+    # Mathematical / PyTorch utilities for Implicit Gradients
+    # =========================================================================
+
+    def _flat_grad(self, loss: torch.Tensor, params: List[torch.Tensor], retain_graph: bool, create_graph: bool) -> torch.Tensor:
+        """Flattens the gradients of the model parameters into a single 1D vector."""
+        grads = torch.autograd.grad(loss, params, retain_graph=retain_graph, create_graph=create_graph)
+        return torch.cat([g.contiguous().view(-1) for g in grads])
+
+    def _hvp(self, loss: torch.Tensor, params: List[torch.Tensor], v: torch.Tensor) -> torch.Tensor:
         """
-        Prints the batch and local indices representing the history of elements currently kept alive in the summary.
+        Computes the Hessian-Vector Product exactly without fully materializing the Hessian matrix.
+        H * v = \nabla_\theta ( \nabla_\theta L \cdot v )
         """
-        _, weights, provenance = self.get_final_coreset()
-        print("Coreset Size:", len(provenance))
-        for w, (b_idx, l_idx) in zip(weights, provenance):
-            print(f"Weight: {w:.4f} | Source Batch: {b_idx} | Local Index: {l_idx}")
+        dl_dtheta = self._flat_grad(loss, params, create_graph=True, retain_graph=True)
+        dl_dtheta_dot_v = torch.dot(dl_dtheta, v)
+        hvp_val = self._flat_grad(dl_dtheta_dot_v, params, retain_graph=True, create_graph=False)
+        return hvp_val
+
+    def _cg_solve(self, f_Ax, b: torch.Tensor, cg_iters: int = 10) -> torch.Tensor:
+        """
+        Conjugate Gradient method to solve Ax = b for x entirely in PyTorch tensors.
+        Used to approximate the inverse Hessian.
+        """
+        x = torch.zeros_like(b)
+        r = b.clone()
+        p = r.clone()
+        rsold = torch.dot(r, r)
+        
+        for i in range(cg_iters):
+            Ap = f_Ax(p)
+            alpha = rsold / (torch.dot(p, Ap) + 1e-8)
+            x = x + alpha * p
+            r = r - alpha * Ap
+            rsnew = torch.dot(r, r)
+            if torch.sqrt(rsnew) < 1e-6:
+                break
+            p = r + (rsnew / rsold) * p
+            rsold = rsnew
+            
+        return x
+
+    def _ihvp(self, loss: torch.Tensor, params: List[torch.Tensor], v: torch.Tensor, cg_iters: int = 15) -> torch.Tensor:
+        """
+        Solves for the Inverse Hessian Vector Product: x = H^{-1} v
+        Where H is the Hessian matrix of the inner loss.
+        """
+        def f_Ax(x):
+            # Added slight damping/Tikhonov regularization (1e-4) to ensure positive-definiteness
+            return self._hvp(loss, params, x) + 1e-4 * x 
+            
+        return self._cg_solve(f_Ax, v, cg_iters)
