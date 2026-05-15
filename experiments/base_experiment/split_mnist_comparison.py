@@ -14,8 +14,9 @@ The standard 10-class MNIST dataset is split into 5 sequential binary tasks:
   Task 4: digits 6 & 7
   Task 5: digits 8 & 9
 
-Each task arrives as a contiguous block in the stream (hard concept-drift
-boundaries), simulating a realistic online continual learning scenario.
+Each task arrives as one contiguous segment in the stream (hard concept-drift
+boundaries between tasks); within a task, the two digit classes are randomly
+interleaved so both appear throughout that segment.
 
 Setup
 -----
@@ -29,9 +30,14 @@ Setup
 
 Evaluation
 ----------
-For each algorithm the final coreset (≤ M points) is used to train four
-downstream classifiers (RandomForest, SVC, Ridge, MLP) on the full MNIST
-test split (10-class accuracy).
+For each algorithm the final coreset (≤ M points) is evaluated under (i)
+architecture-agnostic supervised classifiers — RF, SVC (RBF), Ridge, MLP —
+and geometric KNN; and (ii) task-agnostic probes — K-Means + adjusted Rand
+index on test embeddings (labels used only for scoring), and Isolation
+Forest anomaly separation vs uniform noise (ROC-AUC).
+
+StreamCore uses only feature geometry ($X$) for coreset construction;
+gradient-based baselines are cross-entropy–driven on $y$.
 """
 
 from __future__ import annotations
@@ -55,8 +61,11 @@ for _p in (_PROJECT_ROOT, _SCRIPT_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.linear_model import RidgeClassifier
+from sklearn.metrics import adjusted_rand_score, roc_auc_score
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.kernel_approximation import RBFSampler
 
@@ -65,7 +74,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from dataloaders import load_dataset
-from stream_builders import blocks_to_counts, manual_sample_stream
+from stream_builders import task_based_sample_stream
 from streaming_coreset import StreamingCoreset
 from bilevel_streamer import BilevelStreamingCoreset
 from ocs_coreset import OCSStreamingCoreset
@@ -85,20 +94,16 @@ M              = 100           # coreset / buffer size
 CHUNK_SIZE     = 32            # mini-batch size for streaming
 OUTPUT_DIR     = os.path.join(_PROJECT_ROOT, "split_mnist_results")
 
-# Split-MNIST stream: 5 tasks, each with 2 classes arriving contiguously.
-# Classes inside a task are interleaved so both digits appear together,
-# creating within-task balance while preserving cross-task concept drift.
-_SPLIT_MNIST_BLOCKS = [
-    (0, 1),   # Task 1 — digit 0
-    (1, 1),   # Task 1 — digit 1
-    (2, 1),   # Task 2 — digit 2
-    (3, 1),   # Task 2 — digit 3
-    (4, 1),   # Task 3 — digit 4
-    (5, 1),   # Task 3 — digit 5
-    (6, 1),   # Task 4 — digit 6
-    (7, 1),   # Task 4 — digit 7
-    (8, 1),   # Task 5 — digit 8
-    (9, 1),   # Task 5 — digit 9
+SUPERVISED_MODELS = ["RandomForest", "SVC_RBF", "Ridge", "MLP"]
+TASK_AGNOSTIC_MODELS = ["KNN", "KMeans_ARI", "Anomaly_AUC"]
+
+# Split-MNIST stream: 5 sequential tasks; each task mixes two classes (shuffled).
+_SPLIT_MNIST_TASKS = [
+    [0, 1],
+    [2, 3],
+    [4, 5],
+    [6, 7],
+    [8, 9],
 ]
 
 # ---------------------------------------------------------------------------
@@ -195,6 +200,8 @@ def _extract_buffer(streamer) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     else:
         y_buf = np.array(by, dtype=np.int64).flatten()
 
+    X_buf = X_buf.astype(np.float64)
+    y_buf = y_buf.astype(np.int64)
     weights_buf = np.array(streamer.buffer_weights, dtype=np.float64).flatten()
     return X_buf, y_buf, weights_buf
 
@@ -221,9 +228,13 @@ def _eval_downstream(
     n_classes: int,
     seed: int,
 ) -> Dict[str, float]:
-    """Train 4 classifiers on the coreset; return test accuracies."""
+    """Train / fit downstream models on the coreset; return scalar scores."""
+
+    rng = np.random.default_rng(seed + 913)
+
     results: Dict[str, float] = {}
 
+    # --- Architecture agnosticity (supervised classification) ---
     rf = RandomForestClassifier(n_estimators=100, random_state=seed, n_jobs=-1)
     rf.fit(X_buf, y_buf, sample_weight=weights)
     results["RandomForest"] = float(np.mean(rf.predict(X_test) == y_test))
@@ -238,6 +249,45 @@ def _eval_downstream(
 
     mlp = _train_mlp(X_buf, y_buf, weights, n_classes)
     results["MLP"] = float(np.mean(_predict_mlp(mlp, X_test) == y_test))
+
+    # --- Task agnosticity (geometry / no label supervision in the probe) ---
+    knn = KNeighborsClassifier(n_neighbors=3)
+    knn.fit(X_buf, y_buf)
+    results["KNN"] = float(np.mean(knn.predict(X_test) == y_test))
+
+    # K-Means fitted on coreset features only; ARI compares cluster ids to held-out labels.
+    kmeans = KMeans(n_clusters=n_classes, random_state=seed, n_init=10)
+    try:
+        kmeans.fit(X_buf)
+    except TypeError:
+        kmeans.fit(X_buf)
+    test_clusters = kmeans.predict(X_test)
+    results["KMeans_ARI"] = float(adjusted_rand_score(y_test, test_clusters))
+
+    # C. Anomaly Detection (Isolation Forest)
+    iso_forest = IsolationForest(random_state=seed)
+    try:
+        iso_forest.fit(X_buf, sample_weight=weights)
+    except TypeError:
+        iso_forest.fit(X_buf)
+
+    # Make Hard Anomalies: Perturb the real test data by 1.5x its standard deviation
+    feature_std = np.std(X_test, axis=0)
+    # Ensure no zero standard deviations
+    feature_std = np.where(feature_std == 0, 1e-6, feature_std) 
+    
+    noise_shift = rng.normal(loc=0.0, scale=1.5 * feature_std, size=X_test.shape)
+    hard_anomalies = X_test + noise_shift
+
+    scores_real = iso_forest.decision_function(X_test)
+    scores_anomaly = iso_forest.decision_function(hard_anomalies)
+    
+    y_true_anomaly = np.concatenate([np.ones(len(X_test)), np.zeros(len(hard_anomalies))])
+    y_scores_anomaly = np.concatenate([scores_real, scores_anomaly])
+    try:
+        results["Anomaly_AUC"] = float(roc_auc_score(y_true_anomaly, y_scores_anomaly))
+    except ValueError:
+        results["Anomaly_AUC"] = 0.5
 
     return results
 
@@ -270,15 +320,16 @@ def main() -> None:
     print(f"  Train : {X_train.shape}  |  Test : {X_val.shape}  |  embed_dim={embed_dim}")
 
     # ---- Build Split-MNIST stream ----------------------------------------
-    # blocks_to_counts maps relative weights → exact integer counts summing
-    # to STREAM_LENGTH, preserving the block order (hard concept-drift).
-    explicit_counts = blocks_to_counts(_SPLIT_MNIST_BLOCKS, STREAM_LENGTH)
-    X_stream, y_stream, class_change_steps, per_class_used = manual_sample_stream(
-        X_train, y_train, explicit_counts, N_CLASSES, SEED
+    # STREAM_LENGTH // N_CLASSES points per digit; each task concatenates two
+    # classes and shuffles within the task block (true 5-task Split-MNIST).
+    samples_per_class = STREAM_LENGTH // N_CLASSES
+    X_stream, y_stream, class_change_steps, per_class_used = task_based_sample_stream(
+        X_train, y_train, _SPLIT_MNIST_TASKS, samples_per_class, N_CLASSES, SEED
     )
-    print(f"  Stream shape  : {X_stream.shape}")
-    print(f"  Block counts  : {explicit_counts}")
-    print(f"  Drift steps   : {class_change_steps}")
+    print(f"  Stream shape      : {X_stream.shape}")
+    print(f"  Samples / class   : {samples_per_class}")
+    print(f"  Per-class used    : {per_class_used}")
+    print(f"  Task drift steps  : {class_change_steps}")
 
     # ---- Fit RFF sampler (shared by StreamCore) --------------------------
     sampler_rff = RBFSampler(gamma=RBF_GAMMA, n_components=RFF_DIM, random_state=SEED + 1)
@@ -295,14 +346,14 @@ def main() -> None:
     # ---- Instantiate streamers -------------------------------------------
     streamers: Dict[str, Any] = {
         "StreamCore": StreamingCoreset(
-            M, RFF_DIM, sampler_rff, batch_size=1, K_iter=1000
+            M, RFF_DIM, sampler_rff, K_iter=10
         ),
         "Bilevel": BilevelStreamingCoreset(
             buffer_capacity=M,
             surrogate_model=bilevel_surrogate,
             optimizer=optim.Adam(bilevel_surrogate.parameters(), lr=0.005),
             criterion=nn.CrossEntropyLoss(),
-            epochs=5,
+            epochs=10,
             n_classes=N_CLASSES,
             nr_slots=10,
         ),
@@ -321,7 +372,7 @@ def main() -> None:
             optimizer=optim.Adam(gss_surrogate.parameters(), lr=0.005),
             device=torch.device("cpu"),
             num_random_samples=10,
-            rehearsal_iters=2,
+            rehearsal_iters=10,
         ),
     }
 
@@ -365,16 +416,16 @@ def main() -> None:
         # Normalise weights so average = 1 (sum = len)
         w_buf = _normalise_weights(w_buf)
 
-        print(f"  [{algo_name}] 10-class evaluation on full test set ...")
+        print(f"  [{algo_name}] downstream evaluation (supervised + task-agnostic) ...")
         results = _eval_downstream(
             X_buf, y_buf, w_buf,
             X_val, y_val,
             n_classes=N_CLASSES,
             seed=SEED,
         )
-        for model_name, acc in results.items():
-            records.append(dict(Algorithm=algo_name, Model=model_name, Test_Accuracy=acc))
-            print(f"    {model_name:15s}  {acc:.4f}")
+        for model_name, score in results.items():
+            records.append(dict(Algorithm=algo_name, Model=model_name, Test_Accuracy=score))
+            print(f"    {model_name:18s}  {score:.4f}")
 
     # ---- Save CSV --------------------------------------------------------
     df = pd.DataFrame(records)
@@ -397,88 +448,123 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 
 def _plot_results(df: pd.DataFrame, save_path: str) -> None:
-    """Grouped bar chart: X = downstream model, groups = algorithm."""
-    model_order = ["RandomForest", "SVC_RBF", "Ridge", "MLP"]
-    algo_order  = sorted(df["Algorithm"].unique())
-    n_models = len(model_order)
-    n_algos  = len(algo_order)
-    bar_w = 0.8 / n_algos
-    x = np.arange(n_models)
+    """Two grouped bar charts: supervised accuracy vs geometric / unsupervised probes."""
+    algo_order = sorted(df["Algorithm"].unique())
+    n_algos = len(algo_order)
 
-    fig, ax = plt.subplots(figsize=(11, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+
+    # --- Panel A: supervised (uses labels during training only for these probes) ---
+    ax0 = axes[0]
+    model_order_sup = SUPERVISED_MODELS
+    n_models = len(model_order_sup)
+    bar_w = 0.8 / max(n_algos, 1)
+    x = np.arange(n_models)
     for i, algo in enumerate(algo_order):
         vals = []
-        for m in model_order:
+        for m in model_order_sup:
             row = df[(df["Algorithm"] == algo) & (df["Model"] == m)]
             vals.append(float(row["Test_Accuracy"].values[0]) if len(row) else 0.0)
         offset = (i - n_algos / 2 + 0.5) * bar_w
-        bars = ax.bar(x + offset, vals, bar_w * 0.9,
-                      label=algo, color=f"C{i}", alpha=0.85,
-                      edgecolor="black", linewidth=0.6)
+        bars = ax0.bar(x + offset, vals, bar_w * 0.9, label=algo, color=f"C{i}",
+                       alpha=0.85, edgecolor="black", linewidth=0.6)
         for bar, v in zip(bars, vals):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
-                    f"{v:.3f}", ha="center", va="bottom", fontsize=8)
+            ax0.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                     f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    ax0.set_xticks(x)
+    ax0.set_xticklabels(model_order_sup, fontsize=10, rotation=12, ha="right")
+    ax0.set_ylabel("Accuracy", fontsize=11)
+    ax0.set_title("Architecture agnostic (supervised)", fontsize=12)
+    ax0.set_ylim(0, 1.05)
+    ax0.yaxis.grid(True, alpha=0.3)
+    ax0.legend(title="Coreset alg.", fontsize=9)
+    ax0.set_axisbelow(True)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(model_order, fontsize=11)
-    ax.set_ylabel("Test Accuracy (10-class)")
-    ax.set_xlabel("Downstream Model")
-    ax.set_title(
-        f"Split-MNIST: StreamCore vs Bilevel vs OCS vs GSS  (M={M}, ResNet-18)",
-        fontsize=12,
+    # --- Panel B: task-agnostic (KNN geometric; clustering & anomaly without CE loss) ---
+    ax1 = axes[1]
+    model_order_task = TASK_AGNOSTIC_MODELS
+    n_t = len(model_order_task)
+    x1 = np.arange(n_t)
+    for i, algo in enumerate(algo_order):
+        vals = []
+        for m in model_order_task:
+            row = df[(df["Algorithm"] == algo) & (df["Model"] == m)]
+            vals.append(float(row["Test_Accuracy"].values[0]) if len(row) else 0.0)
+        offset = (i - n_algos / 2 + 0.5) * bar_w
+        bars = ax1.bar(x1 + offset, vals, bar_w * 0.9, label=algo, color=f"C{i}",
+                       alpha=0.85, edgecolor="black", linewidth=0.6)
+        for bar, v in zip(bars, vals):
+            ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                     f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    ax1.set_xticks(x1)
+    ax1.set_xticklabels(["KNN (acc.)", "K-Means (ARI)", "IsoForest (ROC-AUC)"],
+                       fontsize=10, rotation=12, ha="right")
+    ax1.set_ylabel("Score", fontsize=11)
+    ax1.set_title("Task agnostic (geometry & unsupervised probes)", fontsize=12)
+    y_min = min(0.0, df[df["Model"].isin(model_order_task)]["Test_Accuracy"].min())
+    ax1.set_ylim(y_min - 0.06, min(1.08, df[df["Model"].isin(model_order_task)]["Test_Accuracy"].max() + 0.12))
+    ax1.axhline(0.0, color="#999999", linewidth=0.8, linestyle=":")
+    ax1.yaxis.grid(True, alpha=0.3)
+    ax1.legend(title="Coreset alg.", fontsize=9)
+    ax1.set_axisbelow(True)
+
+    fig.suptitle(
+        f"Split-MNIST coreset → downstream probes  (M={M}, ResNet-18 feats)",
+        fontsize=13,
+        y=1.02,
     )
-    ax.legend(title="Algorithm")
-    ax.set_ylim(0, min(1.05, ax.get_ylim()[1] + 0.08))
-    ax.yaxis.grid(True, alpha=0.3)
-    ax.set_axisbelow(True)
     fig.tight_layout()
     fig.savefig(save_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {save_path}")
 
 
-
-
 def _plot_radar_chart(df: pd.DataFrame, save_path: str) -> None:
     """
-    Creates a professional, paper-ready radar (spider) chart showing
-    downstream generalization across different models.
+    Creates a single, unified 7-axis radar chart combining both 
+    supervised and task-agnostic downstream evaluations.
     """
     from math import pi
 
-    model_order = ["RandomForest", "SVC_RBF", "Ridge", "MLP"]
+    # Combine all 7 metrics
+    model_order = ["RandomForest", "SVC_RBF", "Ridge", "MLP", "KNN", "KMeans_ARI", "Anomaly_AUC"]
     algo_order  = sorted(df["Algorithm"].unique())
     
-    # We must append the first model to the end of the list to 'close' the polygon
-    categories = model_order + [model_order[0]]
     N = len(model_order)
     
     # Calculate angles for each axis
     angles = [n / float(N) * 2 * pi for n in range(N)]
-    angles += angles[:1]
+    angles_closed = angles + angles[:1]
     
     # Initialize the spider plot
-    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+    fig, ax = plt.subplots(figsize=(7.5, 7.5), subplot_kw=dict(polar=True))
     
     # Rotate the plot so the first axis is at the top
     ax.set_theta_offset(pi / 2)
     ax.set_theta_direction(-1)
     
-    # Draw one axe per variable + add labels
-    plt.xticks(angles[:-1], model_order, color='black', size=12, weight='bold')
+    # Clean up the labels for the paper
+    display_labels = {
+        "RandomForest": "Random\nForest",
+        "SVC_RBF": "SVC",
+        "KMeans_ARI": "KMeans\n(ARI)",
+        "Anomaly_AUC": "Anomaly\n(AUC)"
+    }
+    lbls = [display_labels.get(m, m) for m in model_order]
     
-    # Dynamic Y-axis scaling to make the differences visible
-    min_val = max(0.0, df["Test_Accuracy"].min() - 0.05)
-    max_val = min(1.0, df["Test_Accuracy"].max() + 0.05)
-    ax.set_ylim(min_val, max_val)
+    # Draw axes and labels
+    ax.set_xticks(angles)
+    ax.set_xticklabels(lbls, color='black', size=11, weight='bold')
     
-    # Define a professional, paper-ready color palette
-    # Make StreamCore a bold crimson/magenta, and baselines cool blue/gray/amber
+    # Lock the Y-axis from slightly below 0 (for ARI) to slightly above 1
+    ax.set_ylim(-0.1, 1.05)
+    
+    # Paper-ready color palette
     color_map = {
         "StreamCore": "#D81B60",  # Bold Pink/Crimson
         "Bilevel": "#1E88E5",     # Cool Blue
         "OCS": "#FFC107",         # Amber/Yellow
-        "GSS": "#7E57C2",         # Purple (distinct from others)
+        "GSS": "#7E57C2",         # Purple
     }
     fallback_colors = plt.cm.Dark2.colors
     
@@ -486,40 +572,45 @@ def _plot_radar_chart(df: pd.DataFrame, save_path: str) -> None:
         vals = []
         for m in model_order:
             row = df[(df["Algorithm"] == algo) & (df["Model"] == m)]
+            # Default to 0.0 if a metric is missing to prevent crashes
             vals.append(float(row["Test_Accuracy"].values[0]) if len(row) else 0.0)
             
         # Append first value to close the polygon
-        vals += vals[:1]
+        vals_closed = vals + vals[:1]
         
         # Styling: Emphasize StreamCore visually
         is_ours = (algo == "StreamCore")
         color = color_map.get(algo, fallback_colors[i % len(fallback_colors)])
-        linewidth = 3.0 if is_ours else 1.5
+        linewidth = 3.5 if is_ours else 1.5
         alpha_fill = 0.20 if is_ours else 0.05
         zorder = 10 if is_ours else 5
         
         # Plot the outline
-        ax.plot(angles, vals, linewidth=linewidth, linestyle='solid', 
+        ax.plot(angles_closed, vals_closed, linewidth=linewidth, linestyle='solid', 
                 label=algo, color=color, zorder=zorder)
         # Fill the polygon
-        ax.fill(angles, vals, color=color, alpha=alpha_fill, zorder=zorder)
+        ax.fill(angles_closed, vals_closed, color=color, alpha=alpha_fill, zorder=zorder)
         
     # Styling the grid
-    ax.grid(color='#E0E0E0', linestyle='--', linewidth=1)
+    ax.grid(color='#CCCCCC', linestyle='--', linewidth=1)
     ax.spines['polar'].set_color('#222222')
     ax.spines['polar'].set_linewidth(1.5)
     
+    # Add an inner circle at y=0 to clearly show where metrics (like ARI) drop
+    ax.plot(np.linspace(0, 2*pi, 100), np.zeros(100), color='#222222', linestyle=':', linewidth=1.5, zorder=1)
+    
     # Add legend outside the plot
     ax.legend(loc='upper right', bbox_to_anchor=(1.35, 1.1), 
-              fontsize=11, frameon=False)
+              fontsize=11, frameon=False, title="Algorithm")
               
-    plt.title("Downstream Generalization Profile", size=14, weight='bold', y=1.1)
+    plt.title("Universal Task Generalization Profile", size=15, weight='bold', y=1.1)
     
     # Save as high-res PDF for LaTeX
     fig.tight_layout()
     fig.savefig(save_path, bbox_inches="tight", dpi=300)
     plt.close(fig)
-    print(f"  Saved Radar Chart: {save_path}")
+    print(f"  Saved Unified Radar Chart: {save_path}")
+
 
 if __name__ == "__main__":
     main()

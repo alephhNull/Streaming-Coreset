@@ -150,6 +150,73 @@ def manual_sample_stream(
     return X, y, class_change_steps, per_class_used
 
 
+def task_based_sample_stream(
+    X_all: np.ndarray,
+    y_all: np.ndarray,
+    task_groups: Sequence[Sequence[int]],
+    samples_per_class: int,
+    n_classes: int,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray, Optional[List[int]], Dict[int, int]]:
+    """Build a stream where each task gathers multiple classes, then shuffles them together.
+
+    Indices are drawn without replacement from per-class pools (shuffled once), consuming
+    ``samples_per_class`` from each class appearing in each task. Task boundaries are
+    recorded in ``class_change_steps`` (1-based end indices of each task, excluding the
+    final stream end), matching ``manual_sample_stream``.
+    """
+    rng = np.random.RandomState(seed)
+
+    available_idxs: Dict[int, np.ndarray] = {}
+    for c in range(n_classes):
+        idx_c = np.where(y_all == c)[0]
+        rng.shuffle(idx_c)
+        available_idxs[c] = idx_c
+
+    used_counters = {c: 0 for c in range(n_classes)}
+    per_class_used = {c: 0 for c in range(n_classes)}
+
+    X_list: List[np.ndarray] = []
+    y_list: List[np.ndarray] = []
+    class_change_steps: List[int] = []
+    current_step = 0
+
+    for task_classes in task_groups:
+        task_X: List[np.ndarray] = []
+        task_y: List[np.ndarray] = []
+        for c in task_classes:
+            start = used_counters[c]
+            end = start + samples_per_class
+            if end > len(available_idxs[c]):
+                raise ValueError(
+                    f"Not enough points for class {c}: need {end}, have {len(available_idxs[c])}"
+                )
+            idxs = available_idxs[c][start:end]
+            task_X.append(X_all[idxs])
+            task_y.append(y_all[idxs])
+            used_counters[c] = end
+            per_class_used[c] += samples_per_class
+
+        task_X_arr = np.concatenate(task_X)
+        task_y_arr = np.concatenate(task_y)
+        shuffle_idx = rng.permutation(len(task_y_arr))
+        X_list.append(task_X_arr[shuffle_idx])
+        y_list.append(task_y_arr[shuffle_idx])
+
+        current_step += len(task_y_arr)
+        class_change_steps.append(current_step)
+
+    if class_change_steps:
+        class_change_steps.pop()
+
+    if not X_list:
+        return np.array([]), np.array([]), [], per_class_used
+
+    X = np.concatenate(X_list)
+    y = np.concatenate(y_list)
+    return X, y, class_change_steps, per_class_used
+
+
 def stratified_sample_stream(
     X_all: np.ndarray,
     y_all: np.ndarray,
