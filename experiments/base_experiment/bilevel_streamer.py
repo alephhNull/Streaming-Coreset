@@ -3,6 +3,7 @@ from typing import Optional, Tuple, List, Any
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
 class AbstractStreamingCoreset(ABC):
     @abstractmethod
@@ -34,15 +35,19 @@ class BilevelStreamingCoreset(AbstractStreamingCoreset):
                  buffer_capacity: int,
                  surrogate_model: Optional[nn.Module] = None,
                  criterion: Optional[nn.Module] = None,
+                 optimizer: Optional[optim.Optimizer] = None,
+                 epochs: int = 10,
                  device: Optional[torch.device] = None,
                  nr_slots: int = 10,
                  n_classes: int = 10):
 
         self.buffer_capacity = buffer_capacity
         self._surrogate_model = surrogate_model   # may be None until first batch
-        self.criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
+        self.criterion = criterion
         self.device = device if device is not None else torch.device("cpu")
         self.n_classes = n_classes
+        self.optimizer = optimizer
+        self.epochs = epochs
 
         # Buffer Management (Section 5: Streaming Coresets via Merge-Reduce)
         # "we divide the buffer into s equally-sized slots"
@@ -125,6 +130,8 @@ class BilevelStreamingCoreset(AbstractStreamingCoreset):
         X_tensor = torch.from_numpy(X_batch_np).float().to(self.device)
         y_tensor = torch.from_numpy(y_batch_np).long().to(self.device)
         
+        self._train_surrogate(X_tensor, y_tensor)
+
         # Track data provenance (batch_idx, local_idx)
         prov = [(batch_idx, i) for i in range(len(X_batch_np))]
         
@@ -171,6 +178,21 @@ class BilevelStreamingCoreset(AbstractStreamingCoreset):
         new_slot = (X_reduced, y_reduced, new_weight, prov_reduced)
         self.buffer.pop(merge_idx + 1)
         self.buffer[merge_idx] = new_slot
+
+    def _train_surrogate(self, X: torch.Tensor, y: torch.Tensor) -> None:
+        """
+        Briefly trains the surrogate model on the current data so that the 
+        gradients used for coreset selection are actually meaningful.
+        """
+        self.surrogate_model.train()
+        # Use Adam for fast convergence on the mini-batch
+                
+        for _ in range(self.epochs):
+            self.optimizer.zero_grad()
+            outputs = self.surrogate_model(X)
+            loss = self.criterion(outputs, y)
+            loss.backward()
+            self.optimizer.step()
 
     def _bilevel_greedy_selection(self, X: torch.Tensor, y: torch.Tensor, prov: List, m: int):
         """

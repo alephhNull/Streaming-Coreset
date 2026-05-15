@@ -1,8 +1,9 @@
 """
 Split-MNIST Streaming Coreset Comparison
 =========================================
-Compares StreamingCoreset (StreamCore) vs BilevelStreamingCoreset (Bilevel)
-on the Split-MNIST continual learning benchmark.
+Compares StreamingCoreset (StreamCore), BilevelStreamingCoreset (Bilevel),
+OCSStreamingCoreset (OCS), and Gradient-Based Sample Selection (GSSStreamer)
+from ``gss_coreset_streamer.py`` (actively trained surrogate) on Split-MNIST.
 
 Split-MNIST definition
 ----------------------
@@ -29,9 +30,8 @@ Setup
 Evaluation
 ----------
 For each algorithm the final coreset (≤ M points) is used to train four
-downstream classifiers (RandomForest, SVC, Ridge, MLP):
-  1. Overall 10-class accuracy on the full MNIST test split.
-  2. Per-task binary accuracy (digits in {c, c+1} only).
+downstream classifiers (RandomForest, SVC, Ridge, MLP) on the full MNIST
+test split (10-class accuracy).
 """
 
 from __future__ import annotations
@@ -68,6 +68,8 @@ from dataloaders import load_dataset
 from stream_builders import blocks_to_counts, manual_sample_stream
 from streaming_coreset import StreamingCoreset
 from bilevel_streamer import BilevelStreamingCoreset
+from ocs_coreset import OCSStreamingCoreset
+from gss_coreset_streamer import GSSStreamer
 
 # ---------------------------------------------------------------------------
 # Hyper-parameters
@@ -79,7 +81,7 @@ RBF_GAMMA      = 0.0001          # tuned for 512-dim ResNet-18 MNIST embeddings
 RFF_DIM        = 1024
 STREAM_LENGTH  = 2000           # 200 points per digit class
 SUBSET_SIZE    = 70_000         # use all MNIST (train + test = 70 k)
-M              = 50            # coreset / buffer size
+M              = 100           # coreset / buffer size
 CHUNK_SIZE     = 32            # mini-batch size for streaming
 OUTPUT_DIR     = os.path.join(_PROJECT_ROOT, "split_mnist_results")
 
@@ -153,12 +155,46 @@ def _predict_mlp(model: _MLP, X: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _extract_buffer(streamer) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (X_buf, y_buf, weights_buf) as numpy arrays."""
-    X_buf = np.vstack(streamer.buffer_X) if len(streamer.buffer_X) > 0 else np.empty((0,))
-    y_buf = np.array(
-        streamer.buffer_y if hasattr(streamer, "buffer_y") else [],
-        dtype=np.int64,
-    ).flatten()
+    """Return (X_buf, y_buf, weights_buf) as numpy arrays.
+
+    Handles list-of-array buffers (StreamCore, Bilevel), tensor buffers (OCS),
+    and list-of-tensor buffers (``gss_coreset_streamer.GSSStreamer``).
+    """
+    if isinstance(streamer, GSSStreamer):
+        if not getattr(streamer, "buffer_X", None) or len(streamer.buffer_X) == 0:
+            return (
+                np.empty((0,)),
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.float64),
+            )
+        X_buf = (
+            torch.stack(streamer.buffer_X).detach().cpu().numpy().astype(np.float64)
+        )
+        y_buf = (
+            torch.stack(streamer.buffer_y).detach().cpu().numpy().astype(np.int64).flatten()
+        )
+        n = len(y_buf)
+        weights = (
+            np.full(n, 1.0 / n, dtype=np.float64)
+            if n > 0
+            else np.array([], dtype=np.float64)
+        )
+        return X_buf, y_buf, weights
+
+    bX = streamer.buffer_X
+    by = streamer.buffer_y if hasattr(streamer, "buffer_y") else []
+
+    # OCS stores torch.Tensor directly; others use lists of numpy arrays
+    if isinstance(bX, torch.Tensor):
+        X_buf = bX.detach().cpu().numpy() if bX is not None and len(bX) > 0 else np.empty((0,))
+    else:
+        X_buf = np.vstack(bX) if len(bX) > 0 else np.empty((0,))
+
+    if isinstance(by, torch.Tensor):
+        y_buf = by.detach().cpu().numpy().flatten().astype(np.int64)
+    else:
+        y_buf = np.array(by, dtype=np.int64).flatten()
+
     weights_buf = np.array(streamer.buffer_weights, dtype=np.float64).flatten()
     return X_buf, y_buf, weights_buf
 
@@ -213,6 +249,7 @@ def _eval_downstream(
 def main() -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     np.random.seed(SEED)
+    torch.manual_seed(SEED)
 
     # ---- Load MNIST with ResNet-18 embeddings ----------------------------
     print(f"[data] Loading {DATASET_NAME} (ResNet-18 embeddings) ...")
@@ -247,12 +284,13 @@ def main() -> None:
     sampler_rff = RBFSampler(gamma=RBF_GAMMA, n_components=RFF_DIM, random_state=SEED + 1)
     sampler_rff.fit(X_stream[:min(500, len(X_stream))])
 
-    # ---- ResNet-18 linear head surrogate for Bilevel ---------------------
-    # The input to the surrogate is the 512-dim ResNet-18 feature vector.
-    # Using a linear classifier as the surrogate captures the linear
-    # separability geometry of the pre-trained embedding space, which is the
-    # most relevant signal for coreset selection quality.
-    surrogate = nn.Linear(embed_dim, N_CLASSES)
+    # ---- ResNet-18 linear head surrogate for Bilevel and OCS ------------
+    # A linear classifier on 512-dim ResNet-18 features is the natural
+    # surrogate: it captures linear separability geometry in the embedding
+    # space and is cheap to differentiate through at each selection step.
+    bilevel_surrogate = nn.Linear(embed_dim, N_CLASSES)
+    ocs_surrogate     = nn.Linear(embed_dim, N_CLASSES)
+    gss_surrogate = nn.Linear(embed_dim, N_CLASSES)
 
     # ---- Instantiate streamers -------------------------------------------
     streamers: Dict[str, Any] = {
@@ -261,9 +299,29 @@ def main() -> None:
         ),
         "Bilevel": BilevelStreamingCoreset(
             buffer_capacity=M,
-            surrogate_model=surrogate,
+            surrogate_model=bilevel_surrogate,
+            optimizer=optim.Adam(bilevel_surrogate.parameters(), lr=0.005),
+            criterion=nn.CrossEntropyLoss(),
+            epochs=5,
             n_classes=N_CLASSES,
             nr_slots=10,
+        ),
+        "OCS": OCSStreamingCoreset(
+            buffer_capacity=M,
+            surrogate_model=ocs_surrogate,
+            criterion=nn.CrossEntropyLoss(),
+            optimizer=optim.Adam(ocs_surrogate.parameters(), lr=0.005),
+            device=torch.device("cpu"),
+            tau=1000.0,
+        ),
+        "GSS": GSSStreamer(
+            buffer_capacity=M,
+            surrogate_model=gss_surrogate,
+            criterion=nn.CrossEntropyLoss(),
+            optimizer=optim.Adam(gss_surrogate.parameters(), lr=0.005),
+            device=torch.device("cpu"),
+            num_random_samples=10,
+            rehearsal_iters=2,
         ),
     }
 
@@ -325,7 +383,11 @@ def main() -> None:
     print(df.to_string(index=False))
 
     # ---- Plot ------------------------------------------------------------
-    _plot_results(df, os.path.join(OUTPUT_DIR, "split_mnist_results.pdf"))
+    bar_path = os.path.join(OUTPUT_DIR, "split_mnist_bar_chart.pdf")
+    radar_path = os.path.join(OUTPUT_DIR, "split_mnist_radar_chart.pdf")
+    
+    _plot_results(df, bar_path)
+    _plot_radar_chart(df, radar_path)
 
     print("\nDone. Results saved to:", OUTPUT_DIR)
 
@@ -343,7 +405,7 @@ def _plot_results(df: pd.DataFrame, save_path: str) -> None:
     bar_w = 0.8 / n_algos
     x = np.arange(n_models)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(11, 5))
     for i, algo in enumerate(algo_order):
         vals = []
         for m in model_order:
@@ -362,7 +424,7 @@ def _plot_results(df: pd.DataFrame, save_path: str) -> None:
     ax.set_ylabel("Test Accuracy (10-class)")
     ax.set_xlabel("Downstream Model")
     ax.set_title(
-        f"Split-MNIST: StreamCore vs Bilevel  (M={M}, ResNet-18 embeddings)",
+        f"Split-MNIST: StreamCore vs Bilevel vs OCS vs GSS  (M={M}, ResNet-18)",
         fontsize=12,
     )
     ax.legend(title="Algorithm")
@@ -374,6 +436,90 @@ def _plot_results(df: pd.DataFrame, save_path: str) -> None:
     plt.close(fig)
     print(f"  Saved: {save_path}")
 
+
+
+
+def _plot_radar_chart(df: pd.DataFrame, save_path: str) -> None:
+    """
+    Creates a professional, paper-ready radar (spider) chart showing
+    downstream generalization across different models.
+    """
+    from math import pi
+
+    model_order = ["RandomForest", "SVC_RBF", "Ridge", "MLP"]
+    algo_order  = sorted(df["Algorithm"].unique())
+    
+    # We must append the first model to the end of the list to 'close' the polygon
+    categories = model_order + [model_order[0]]
+    N = len(model_order)
+    
+    # Calculate angles for each axis
+    angles = [n / float(N) * 2 * pi for n in range(N)]
+    angles += angles[:1]
+    
+    # Initialize the spider plot
+    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+    
+    # Rotate the plot so the first axis is at the top
+    ax.set_theta_offset(pi / 2)
+    ax.set_theta_direction(-1)
+    
+    # Draw one axe per variable + add labels
+    plt.xticks(angles[:-1], model_order, color='black', size=12, weight='bold')
+    
+    # Dynamic Y-axis scaling to make the differences visible
+    min_val = max(0.0, df["Test_Accuracy"].min() - 0.05)
+    max_val = min(1.0, df["Test_Accuracy"].max() + 0.05)
+    ax.set_ylim(min_val, max_val)
+    
+    # Define a professional, paper-ready color palette
+    # Make StreamCore a bold crimson/magenta, and baselines cool blue/gray/amber
+    color_map = {
+        "StreamCore": "#D81B60",  # Bold Pink/Crimson
+        "Bilevel": "#1E88E5",     # Cool Blue
+        "OCS": "#FFC107",         # Amber/Yellow
+        "GSS": "#7E57C2",         # Purple (distinct from others)
+    }
+    fallback_colors = plt.cm.Dark2.colors
+    
+    for i, algo in enumerate(algo_order):
+        vals = []
+        for m in model_order:
+            row = df[(df["Algorithm"] == algo) & (df["Model"] == m)]
+            vals.append(float(row["Test_Accuracy"].values[0]) if len(row) else 0.0)
+            
+        # Append first value to close the polygon
+        vals += vals[:1]
+        
+        # Styling: Emphasize StreamCore visually
+        is_ours = (algo == "StreamCore")
+        color = color_map.get(algo, fallback_colors[i % len(fallback_colors)])
+        linewidth = 3.0 if is_ours else 1.5
+        alpha_fill = 0.20 if is_ours else 0.05
+        zorder = 10 if is_ours else 5
+        
+        # Plot the outline
+        ax.plot(angles, vals, linewidth=linewidth, linestyle='solid', 
+                label=algo, color=color, zorder=zorder)
+        # Fill the polygon
+        ax.fill(angles, vals, color=color, alpha=alpha_fill, zorder=zorder)
+        
+    # Styling the grid
+    ax.grid(color='#E0E0E0', linestyle='--', linewidth=1)
+    ax.spines['polar'].set_color('#222222')
+    ax.spines['polar'].set_linewidth(1.5)
+    
+    # Add legend outside the plot
+    ax.legend(loc='upper right', bbox_to_anchor=(1.35, 1.1), 
+              fontsize=11, frameon=False)
+              
+    plt.title("Downstream Generalization Profile", size=14, weight='bold', y=1.1)
+    
+    # Save as high-res PDF for LaTeX
+    fig.tight_layout()
+    fig.savefig(save_path, bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"  Saved Radar Chart: {save_path}")
 
 if __name__ == "__main__":
     main()
