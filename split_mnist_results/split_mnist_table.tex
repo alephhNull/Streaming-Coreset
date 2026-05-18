@@ -1,0 +1,20 @@
+\begin{table*}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\caption{Split-MNIST Streaming Coreset Comparison}
+\label{tab:split_mnist_results}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l *{7}{c} *{7}{c} *{7}{c}}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{7}{c}{$M=20$} & \multicolumn{7}{c}{$M=50$} & \multicolumn{7}{c}{$M=100$} \\
+\cmidrule(lr){2-8}\cmidrule(lr){9-15}\cmidrule(lr){16-22}
+ & RF & SVC & Ridge & MLP & KNN & ARI & AUC & RF & SVC & Ridge & MLP & KNN & ARI & AUC & RF & SVC & Ridge & MLP & KNN & ARI & AUC \\
+\midrule
+Bilevel & 0.30 & 0.15 & 0.42 & 0.44 & 0.33 & 0.15 & 0.96 & 0.38 & 0.29 & 0.46 & 0.46 & 0.31 & 0.13 & 0.98 & 0.44 & 0.29 & 0.58 & 0.55 & 0.39 & 0.16 & 0.97 \\
+GSS & 0.34 & 0.18 & 0.46 & 0.44 & 0.38 & 0.23 & 0.97 & 0.41 & 0.40 & 0.49 & 0.51 & 0.41 & 0.25 & 0.98 & 0.42 & 0.43 & 0.58 & 0.57 & 0.45 & 0.20 & 0.97 \\
+OCS & 0.42 & \textbf{0.44} & 0.47 & 0.49 & 0.33 & 0.21 & 0.97 & 0.54 & \textbf{0.55} & 0.64 & 0.56 & 0.50 & 0.27 & 0.98 & 0.64 & 0.64 & 0.75 & 0.69 & 0.61 & \textbf{0.38} & \textbf{0.99} \\
+StreamCore & \textbf{0.51} & 0.21 & \textbf{0.64} & \textbf{0.63} & \textbf{0.47} & \textbf{0.24} & \textbf{0.98} & \textbf{0.63} & 0.41 & \textbf{0.77} & \textbf{0.75} & \textbf{0.58} & \textbf{0.28} & \textbf{0.99} & \textbf{0.73} & \textbf{0.70} & \textbf{0.82} & \textbf{0.82} & \textbf{0.68} & 0.30 & 0.98 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}

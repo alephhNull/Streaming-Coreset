@@ -24,7 +24,6 @@ Setup
 - Bilevel surrogate : nn.Linear(512, 10) — a linear head on top of the
   frozen ResNet-18 feature extractor; gradients through this head supply
   the implicit-gradient signal for greedy coreset selection.
-- Buffer size M = 100.
 - Data is streamed in mini-batches of CHUNK_SIZE points so that the
   Bilevel merge-reduce framework receives meaningful batches.
 
@@ -90,9 +89,11 @@ RBF_GAMMA      = 0.0001          # tuned for 512-dim ResNet-18 MNIST embeddings
 RFF_DIM        = 1024
 STREAM_LENGTH  = 2000           # 200 points per digit class
 SUBSET_SIZE    = 70_000         # use all MNIST (train + test = 70 k)
-M              = 100           # coreset / buffer size
-CHUNK_SIZE     = 32            # mini-batch size for streaming
+CHUNK_SIZE     = 32             # mini-batch size for streaming
 OUTPUT_DIR     = os.path.join(_PROJECT_ROOT, "split_mnist_results")
+
+# Array of buffer sizes to test
+M_VALUES       = [20, 50, 100]
 
 SUPERVISED_MODELS = ["RandomForest", "SVC_RBF", "Ridge", "MLP"]
 TASK_AGNOSTIC_MODELS = ["KNN", "KMeans_ARI", "Anomaly_AUC"]
@@ -320,8 +321,6 @@ def main() -> None:
     print(f"  Train : {X_train.shape}  |  Test : {X_val.shape}  |  embed_dim={embed_dim}")
 
     # ---- Build Split-MNIST stream ----------------------------------------
-    # STREAM_LENGTH // N_CLASSES points per digit; each task concatenates two
-    # classes and shuffles within the task block (true 5-task Split-MNIST).
     samples_per_class = STREAM_LENGTH // N_CLASSES
     X_stream, y_stream, class_change_steps, per_class_used = task_based_sample_stream(
         X_train, y_train, _SPLIT_MNIST_TASKS, samples_per_class, N_CLASSES, SEED
@@ -335,119 +334,230 @@ def main() -> None:
     sampler_rff = RBFSampler(gamma=RBF_GAMMA, n_components=RFF_DIM, random_state=SEED + 1)
     sampler_rff.fit(X_stream[:min(500, len(X_stream))])
 
-    # ---- ResNet-18 linear head surrogate for Bilevel and OCS ------------
-    # A linear classifier on 512-dim ResNet-18 features is the natural
-    # surrogate: it captures linear separability geometry in the embedding
-    # space and is cheap to differentiate through at each selection step.
-    bilevel_surrogate = nn.Linear(embed_dim, N_CLASSES)
-    ocs_surrogate     = nn.Linear(embed_dim, N_CLASSES)
-    gss_surrogate = nn.Linear(embed_dim, N_CLASSES)
-
-    # ---- Instantiate streamers -------------------------------------------
-    streamers: Dict[str, Any] = {
-        "StreamCore": StreamingCoreset(
-            M, RFF_DIM, sampler_rff, K_iter=10
-        ),
-        "Bilevel": BilevelStreamingCoreset(
-            buffer_capacity=M,
-            surrogate_model=bilevel_surrogate,
-            optimizer=optim.Adam(bilevel_surrogate.parameters(), lr=0.005),
-            criterion=nn.CrossEntropyLoss(),
-            epochs=10,
-            n_classes=N_CLASSES,
-            nr_slots=10,
-        ),
-        "OCS": OCSStreamingCoreset(
-            buffer_capacity=M,
-            surrogate_model=ocs_surrogate,
-            criterion=nn.CrossEntropyLoss(),
-            optimizer=optim.Adam(ocs_surrogate.parameters(), lr=0.005),
-            device=torch.device("cpu"),
-            tau=1000.0,
-        ),
-        "GSS": GSSStreamer(
-            buffer_capacity=M,
-            surrogate_model=gss_surrogate,
-            criterion=nn.CrossEntropyLoss(),
-            optimizer=optim.Adam(gss_surrogate.parameters(), lr=0.005),
-            device=torch.device("cpu"),
-            num_random_samples=10,
-            rehearsal_iters=10,
-        ),
-    }
-
-    # ---- Stream data in mini-batches ------------------------------------
-    # Mini-batches give the Bilevel merge-reduce framework meaningful chunks
-    # to compress (greedy selection on a single point is trivial).
-    n_total = len(X_stream)
-    n_batches = (n_total + CHUNK_SIZE - 1) // CHUNK_SIZE
-    print(f"\n[stream] Streaming {n_total} points in {n_batches} chunks of {CHUNK_SIZE} ...")
-
-    for batch_idx in range(n_batches):
-        lo = batch_idx * CHUNK_SIZE
-        hi = min(lo + CHUNK_SIZE, n_total)
-        Xb = X_stream[lo:hi]
-        yb = y_stream[lo:hi]
-
-        for name, st in streamers.items():
-            st.process_batch(Xb, yb, batch_idx=batch_idx)
-
-        if (batch_idx + 1) % 5 == 0 or batch_idx == n_batches - 1:
-            print(f"  chunk {batch_idx + 1}/{n_batches}  (pts {hi}/{n_total})")
-
-    # ---- Extract final coresets and evaluate ----------------------------
-    print("\n[eval] Extracting coresets ...")
     records: List[Dict] = []
+    
+    # Iterate through all M values
+    for M in M_VALUES:
+        print(f"\n{'='*50}")
+        print(f" Running experiments for M = {M}")
+        print(f"{'='*50}")
+        
+        # Instantiate fresh surrogates for each M to avoid state-bleed
+        bilevel_surrogate = nn.Linear(embed_dim, N_CLASSES)
+        ocs_surrogate     = nn.Linear(embed_dim, N_CLASSES)
+        gss_surrogate     = nn.Linear(embed_dim, N_CLASSES)
 
-    for algo_name, streamer in streamers.items():
-        X_buf, y_buf, w_buf = _extract_buffer(streamer)
+        # ---- Instantiate streamers -------------------------------------------
+        streamers: Dict[str, Any] = {
+            "StreamCore": StreamingCoreset(
+                M, RFF_DIM, sampler_rff, K_iter=10
+            ),
+            "Bilevel": BilevelStreamingCoreset(
+                buffer_capacity=M,
+                surrogate_model=bilevel_surrogate,
+                optimizer=optim.Adam(bilevel_surrogate.parameters(), lr=0.005),
+                criterion=nn.CrossEntropyLoss(),
+                epochs=10,
+                n_classes=N_CLASSES,
+                nr_slots=10,
+            ),
+            "OCS": OCSStreamingCoreset(
+                buffer_capacity=M,
+                surrogate_model=ocs_surrogate,
+                criterion=nn.CrossEntropyLoss(),
+                optimizer=optim.Adam(ocs_surrogate.parameters(), lr=0.005),
+                device=torch.device("cpu"),
+                tau=1000.0,
+            ),
+            "GSS": GSSStreamer(
+                buffer_capacity=M,
+                surrogate_model=gss_surrogate,
+                criterion=nn.CrossEntropyLoss(),
+                optimizer=optim.Adam(gss_surrogate.parameters(), lr=0.005),
+                device=torch.device("cpu"),
+                num_random_samples=10,
+                rehearsal_iters=10,
+            ),
+        }
 
-        assert len(X_buf) <= M, (
-            f"[{algo_name}] Buffer size {len(X_buf)} exceeds M={M}"
-        )
+        # ---- Stream data in mini-batches ------------------------------------
+        n_total = len(X_stream)
+        n_batches = (n_total + CHUNK_SIZE - 1) // CHUNK_SIZE
+        print(f"\n[stream] Streaming {n_total} points in {n_batches} chunks of {CHUNK_SIZE} ...")
 
-        n_unique = len(np.unique(y_buf))
-        print(f"  [{algo_name}] buffer={len(X_buf)}, classes={n_unique}")
+        for batch_idx in range(n_batches):
+            lo = batch_idx * CHUNK_SIZE
+            hi = min(lo + CHUNK_SIZE, n_total)
+            Xb = X_stream[lo:hi]
+            yb = y_stream[lo:hi]
 
-        if n_unique < 2:
-            print(f"  [DEGENERATE] {algo_name}: only {n_unique} class(es), skipping.")
-            continue
+            for name, st in streamers.items():
+                st.process_batch(Xb, yb, batch_idx=batch_idx)
 
-        # Normalise weights so average = 1 (sum = len)
-        w_buf = _normalise_weights(w_buf)
+            if (batch_idx + 1) % 5 == 0 or batch_idx == n_batches - 1:
+                print(f"  chunk {batch_idx + 1}/{n_batches}  (pts {hi}/{n_total})")
 
-        print(f"  [{algo_name}] downstream evaluation (supervised + task-agnostic) ...")
-        results = _eval_downstream(
-            X_buf, y_buf, w_buf,
-            X_val, y_val,
-            n_classes=N_CLASSES,
-            seed=SEED,
-        )
-        for model_name, score in results.items():
-            records.append(dict(Algorithm=algo_name, Model=model_name, Test_Accuracy=score))
-            print(f"    {model_name:18s}  {score:.4f}")
+        # ---- Extract final coresets and evaluate ----------------------------
+        print("\n[eval] Extracting coresets ...")
+
+        for algo_name, streamer in streamers.items():
+            X_buf, y_buf, w_buf = _extract_buffer(streamer)
+
+            assert len(X_buf) <= M, (
+                f"[{algo_name}] Buffer size {len(X_buf)} exceeds M={M}"
+            )
+
+            n_unique = len(np.unique(y_buf))
+            print(f"  [{algo_name}] buffer={len(X_buf)}, classes={n_unique}")
+
+            if n_unique < 2:
+                print(f"  [DEGENERATE] {algo_name}: only {n_unique} class(es), skipping.")
+                continue
+
+            # Normalise weights so average = 1 (sum = len)
+            w_buf = _normalise_weights(w_buf)
+
+            print(f"  [{algo_name}] downstream evaluation (supervised + task-agnostic) ...")
+            results = _eval_downstream(
+                X_buf, y_buf, w_buf,
+                X_val, y_val,
+                n_classes=N_CLASSES,
+                seed=SEED,
+            )
+            for model_name, score in results.items():
+                records.append(dict(Algorithm=algo_name, M=M, Model=model_name, Test_Accuracy=score))
+                print(f"    {model_name:18s}  {score:.4f}")
 
     # ---- Save CSV --------------------------------------------------------
     df = pd.DataFrame(records)
     df.to_csv(os.path.join(OUTPUT_DIR, "split_mnist_results.csv"), index=False)
-    print("\n--- Results ---")
-    print(df.to_string(index=False))
+    print("\n--- Results Saved to CSV ---")
 
-    # ---- Plot ------------------------------------------------------------
-    bar_path = os.path.join(OUTPUT_DIR, "split_mnist_bar_chart.pdf")
-    radar_path = os.path.join(OUTPUT_DIR, "split_mnist_radar_chart.pdf")
-    
-    _plot_results(df, bar_path)
-    _plot_radar_chart(df, radar_path)
+    # ---- Generate LaTeX Table --------------------------------------------
+    table_path = os.path.join(OUTPUT_DIR, "split_mnist_table.tex")
+    _generate_latex_table(df, M_VALUES, table_path)
+
+    # ---- Plot (Filters to M=100 so original layout doesn't break) --------
+    df_m100 = df[df["M"] == 100].copy()
+    if not df_m100.empty:
+        bar_path = os.path.join(OUTPUT_DIR, "split_mnist_bar_chart.pdf")
+        radar_path = os.path.join(OUTPUT_DIR, "split_mnist_radar_chart.pdf")
+        
+        _plot_results(df_m100, bar_path, title_m=100)
+        _plot_radar_chart(df_m100, radar_path)
 
     print("\nDone. Results saved to:", OUTPUT_DIR)
 
 
 # ---------------------------------------------------------------------------
-# Visualisation
+# Visualisation & Output Helpers
 # ---------------------------------------------------------------------------
 
-def _plot_results(df: pd.DataFrame, save_path: str) -> None:
+import re
+import pandas as pd
+
+def _generate_latex_table(df: pd.DataFrame, m_values: list, output_path: str):
+    """
+    Takes a flat DataFrame of experiment results, pivots it into a multi-column
+    layout, and formats it exactly to match the target IEEE/ACM booktabs style.
+    """
+    df_copy = df.copy()
+    
+    # 1. Clean up model names to match the paper's desired column headers
+    rename_models = {
+        "RandomForest": "RF", "SVC_RBF": "SVC", "Ridge": "Ridge", 
+        "MLP": "MLP", "KNN": "KNN", "KMeans_ARI": "ARI", "Anomaly_AUC": "AUC"
+    }
+    df_copy["Model"] = df_copy["Model"].replace(rename_models)
+    
+    # 2. Pivot the table: Algorithms as rows; M and Model as nested columns
+    pivot_df = df_copy.pivot(index="Algorithm", columns=["M", "Model"], values="Test_Accuracy")
+    
+    # 3. Enforce the exact column order
+    model_order = ["RF", "SVC", "Ridge", "MLP", "KNN", "ARI", "AUC"]
+    expected_cols = pd.MultiIndex.from_product([m_values, model_order])
+    pivot_df = pivot_df.reindex(columns=expected_cols)
+    
+    # CRITICAL: Strip index and column names so pandas doesn't print them
+    pivot_df.index.name = None
+    pivot_df.columns.names = [None, None]
+    
+    # 4. Style: Bold the maximum value in each column
+    styler = pivot_df.style \
+        .format(precision=2) \
+        .highlight_max(axis=0, props="textbf:--rwrap;") 
+    
+    # Generate the base LaTeX string with \toprule, \midrule, \bottomrule
+    latex_str = styler.to_latex(hrules=True)
+    
+    # ---------------------------------------------------------
+    # String Manipulations to match the exact target LaTeX shape
+    # ---------------------------------------------------------
+    
+    num_models = len(model_order)
+    
+    # A. Remove vertical lines, group by M (e.g., l *{7}{c} *{7}{c} *{7}{c})
+    tabular_fmt = "l" + "".join([f" *{{{num_models}}}{{c}}" for _ in m_values])
+    latex_str = re.sub(r'\\begin\{tabular\}\{.*?\}', f'\\\\begin{{tabular}}{{{tabular_fmt}}}', latex_str)
+    
+    # B. Format the M headers and build the \cmidrule string
+    cmidrules = []
+    start_col = 2
+    for m in m_values:
+        # ROBUST REGEX: Catch any alignment pandas uses (l, r, or c) and force to 'c' with math mode
+        pattern = r"\\multicolumn\{" + str(num_models) + r"\}\{[lrc]\}\{" + str(m) + r"\}"
+        replacement = r"\\multicolumn{" + str(num_models) + r"}{c}{$M=" + str(m) + r"$}"
+        latex_str = re.sub(pattern, replacement, latex_str)
+        
+        # Calculate start and end columns for \cmidrule
+        end_col = start_col + num_models - 1
+        cmidrules.append(f"\\cmidrule(lr){{{start_col}-{end_col}}}")
+        start_col = end_col + 1
+        
+    cmidrule_str = "".join(cmidrules)
+    
+    # C. Inject \multirow and \cmidrule into the header lines
+    lines = latex_str.split('\n')
+    new_lines = []
+    for line in lines:
+        if "\\multicolumn" in line:
+            # Replace the leading empty cell with \multirow
+            line = re.sub(r'^\s*&\s*\\multicolumn', r'\\multirow{2}{*}{\\textbf{Method}} & \\multicolumn', line)
+            new_lines.append(line)
+            # Insert the horizontal dividers immediately after the top header row
+            new_lines.append(cmidrule_str)
+        else:
+            new_lines.append(line)
+            
+    latex_str = "\n".join(new_lines)
+    
+    # D. Wrap in the table environment with \arraystretch and \resizebox
+    wrapper = (
+        "\\begin{table*}[htbp]\n"
+        "\\centering\n"
+        "\\renewcommand{\\arraystretch}{1.2}\n"
+        "\\caption{Split-MNIST Streaming Coreset Comparison}\n"
+        "\\label{tab:split_mnist_results}\n"
+        "\\resizebox{\\linewidth}{!}{\n"
+        "\\begin{tabular}"
+    )
+    latex_str = latex_str.replace("\\begin{tabular}", wrapper)
+    
+    footer = (
+        "\\end{tabular}\n"
+        "}\n"
+        "\\end{table*}"
+    )
+    latex_str = latex_str.replace("\\end{tabular}", footer)
+    
+    # 5. Save to disk
+    with open(output_path, "w") as f:
+        f.write(latex_str)
+    
+    print(f"  Saved formatted LaTeX Table: {output_path}")
+
+
+def _plot_results(df: pd.DataFrame, save_path: str, title_m: int) -> None:
     """Two grouped bar charts: supervised accuracy vs geometric / unsupervised probes."""
     algo_order = sorted(df["Algorithm"].unique())
     n_algos = len(algo_order)
@@ -509,14 +619,14 @@ def _plot_results(df: pd.DataFrame, save_path: str) -> None:
     ax1.set_axisbelow(True)
 
     fig.suptitle(
-        f"Split-MNIST coreset → downstream probes  (M={M}, ResNet-18 feats)",
+        f"Split-MNIST coreset → downstream probes  (M={title_m}, ResNet-18 feats)",
         fontsize=13,
         y=1.02,
     )
     fig.tight_layout()
     fig.savefig(save_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved: {save_path}")
+    print(f"  Saved Bar Chart: {save_path}")
 
 
 def _plot_radar_chart(df: pd.DataFrame, save_path: str) -> None:
